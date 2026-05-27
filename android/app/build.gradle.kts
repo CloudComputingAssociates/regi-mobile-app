@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "net.regimenu.regi_chat"
+    namespace = "com.regimenu.app"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
@@ -20,14 +20,14 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "net.regimenu.regi_chat"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
+        applicationId = "com.regimenu.app"
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        manifestPlaceholders["auth0Domain"] = "dev-sj1bmj8255bwte7r.us.auth0.com"
+        manifestPlaceholders["auth0Scheme"] = "com.regimenu.app"
     }
 
     buildTypes {

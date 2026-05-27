@@ -9,8 +9,8 @@ import '../models/input_mode.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
 import '../services/mic_level_service.dart';
+import '../services/speech_service.dart';
 import '../services/tts_service.dart' show TtsService, TtsException;
-import '../services/web_speech_service.dart';
 import '../state/chat_state.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
@@ -27,7 +27,7 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final ChatService _chat = ChatService();
-  final WebSpeechService _speech = WebSpeechService();
+  final SpeechService _speech = SpeechService();
   final TtsService _tts = TtsService();
   // Constructed but currently dormant — see _handleTalkStart for why
   // start() is not called. Kept wired (import + dispose) so re-enabling
@@ -60,15 +60,16 @@ class _ChatScreenState extends State<ChatScreen> {
     // lights amber only when the recognizer is genuinely capturing audio,
     // not just when the user pressed the button. This is the "ready" cue
     // for the beginning-word cut-off issue: users learn to wait for the
-    // amber glow before they start speaking.
+    // amber glow before they start speaking. The platform recognizer emits
+    // 'listening' / 'notListening' / 'done'; map both terminal states to
+    // not-listening so the icon reverts promptly.
     _speechStatusSub = _speech.statuses.listen((s) {
       if (!mounted) return;
       switch (s) {
         case 'listening':
-        case 'speech-detected':
           context.read<ChatState>().setListening(true);
+        case 'notListening':
         case 'done':
-        case 'speech-ended':
           context.read<ChatState>().setListening(false);
       }
     });
@@ -304,11 +305,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
     // NOTE: parallel MicLevelService.start() (getUserMedia + AnalyserNode)
     // is intentionally NOT called here. On at least one tested browser,
-    // running a second audio capture alongside webkitSpeechRecognition
-    // starves the recognizer of audio — the bars animate but STT stops
-    // producing transcripts. The service is kept for a future fix
-    // (single-capture-with-two-consumers, if/when feasible). Until then,
-    // MicLevelBars uses its ripple fallback.
+    // running a second audio capture alongside the recognizer starves it
+    // of audio — the bars animate but STT stops producing transcripts.
+    // The service is kept for a future fix (single-capture-with-two-
+    // consumers, if/when feasible). Until then, MicLevelBars uses its
+    // ripple fallback.
   }
 
   Future<void> _handleTalkEnd() async {

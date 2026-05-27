@@ -4,7 +4,7 @@
 // injectable for testing.
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:regi_chat/app.dart';
+import 'package:regi_mobile_appapp.dart';
 
 void main() {
   test('RegiChatApp constructor compiles', () {
