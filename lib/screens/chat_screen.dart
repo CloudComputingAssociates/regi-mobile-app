@@ -16,7 +16,14 @@ import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
 import '../widgets/ptt_button.dart';
-import '../widgets/voice_picker.dart';
+
+// Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
+// "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
+// services/external_apis/gcp_tts_service.go. Voice selection UI is
+// deferred to v1.2 (App Preferences).
+// Temporarily James (Neural2-D, default) to test whether Neural2-J specifically
+// is failing in this GCP project. Once confirmed, swap back to Neural2-J.
+const String _pinnedVoiceId = 'en-US-Neural2-D';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -73,7 +80,6 @@ class _ChatScreenState extends State<ChatScreen> {
           context.read<ChatState>().setListening(false);
       }
     });
-    WidgetsBinding.instance.addPostFrameCallback((_) => _loadVoices());
     _loadSkipClearPref();
   }
 
@@ -83,16 +89,6 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _skipClearConfirm = prefs.getBool(_skipClearPrefKey) ?? false;
     });
-  }
-
-  Future<void> _loadVoices() async {
-    if (!mounted) return;
-    final auth = context.read<AuthService>();
-    final jwt = await auth.getAccessToken();
-    if (jwt == null || !mounted) return;
-    final voices = await _tts.fetchVoices(jwt: jwt);
-    if (!mounted) return;
-    context.read<ChatState>().setAvailableVoices(voices);
   }
 
   @override
@@ -174,7 +170,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
     if (state.ttsEnabled && stream.content.trim().isNotEmpty) {
       final replyText = stream.content;
-      final voiceId = state.selectedVoice?.id;
+      const voiceId = _pinnedVoiceId;
       final rate = state.ttsRate;
       unawaited(() async {
         final freshJwt = await auth.getAccessToken() ?? jwt;
@@ -383,7 +379,6 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Column(
             children: [
-              const VoicePicker(),
               const Expanded(child: ChatOutput()),
               ChatInput(
                 onSend: _sendMessage,

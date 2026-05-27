@@ -40,6 +40,18 @@ class AuthService extends ChangeNotifier {
       }
     } else {
       _auth0Native = Auth0(_domain, _clientId);
+      // Silent restore: if a refresh token from a prior session is still in
+      // the keystore, hasValidCredentials() refreshes it and returns true with
+      // no UI. Native users only see the Auth0 login page on first launch or
+      // after explicit logout.
+      try {
+        final manager = _auth0Native!.credentialsManager;
+        if (await manager.hasValidCredentials()) {
+          _credentials = await manager.credentials();
+        }
+      } catch (_) {
+        // No stored creds, or refresh failed — fall through to login screen.
+      }
     }
 
     _initialized = true;
@@ -55,8 +67,12 @@ class AuthService extends ChangeNotifier {
       );
     } else {
       final creds = await _auth0Native!
-          .webAuthentication(scheme: 'regichat')
-          .login(audience: _audience.isNotEmpty ? _audience : null);
+          .webAuthentication(scheme: 'com.regimenu.app')
+          .login(
+            audience: _audience.isNotEmpty ? _audience : null,
+            scopes: const {'openid', 'profile', 'email', 'offline_access'},
+          );
+      await _auth0Native!.credentialsManager.storeCredentials(creds);
       _credentials = creds;
       notifyListeners();
     }
@@ -66,7 +82,8 @@ class AuthService extends ChangeNotifier {
     if (kIsWeb) {
       await _auth0Web!.logout(returnToUrl: Uri.base.origin);
     } else {
-      await _auth0Native!.webAuthentication(scheme: 'regichat').logout();
+      await _auth0Native!.webAuthentication(scheme: 'com.regimenu.app').logout();
+      await _auth0Native!.credentialsManager.clearCredentials();
     }
     _credentials = null;
     notifyListeners();

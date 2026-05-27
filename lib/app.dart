@@ -45,7 +45,7 @@ class _RegiChatAppState extends State<RegiChatApp> {
         ChangeNotifierProvider<ChatState>.value(value: _chat),
       ],
       child: MaterialApp(
-        title: 'RegiMenu Chat',
+        title: 'RegiMenu',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(

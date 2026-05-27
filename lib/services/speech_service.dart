@@ -16,6 +16,17 @@ class SpeechService {
   final StreamController<String> _statuses =
       StreamController<String>.broadcast();
 
+  // True between listen() and stop(). The Android Google recognizer in
+  // dictation mode finalizes on any short silence (it ignores pauseFor),
+  // so we restart the engine each time it self-terminates while the user
+  // is still meant to be talking. PTT becomes a true walkie-talkie.
+  bool _keepListening = false;
+  // The platform's onResult.recognizedWords covers ONLY the current engine
+  // session. We snapshot the last words into _cumulative before each
+  // restart, so the listener sees one continuous joined transcript.
+  String _cumulative = '';
+  String _currentChunk = '';
+
   bool get isAvailable => _speech.isAvailable;
 
   /// Emits human-readable error messages whenever STT init or recognition
@@ -31,6 +42,17 @@ class SpeechService {
       _initialized = await _speech.initialize(
         onStatus: (s) {
           if (!_statuses.isClosed) _statuses.add(s);
+          // Engine self-terminated (Android's silence cutoff fired). If the
+          // user is still meant to be talking, snapshot the current chunk
+          // and restart so PTT keeps capturing.
+          if ((s == 'notListening' || s == 'done') && _keepListening) {
+            _snapshotChunk();
+            // Defer; the platform won't accept listen() from inside its
+            // own status callback. 50ms is enough for teardown.
+            Future<void>.delayed(const Duration(milliseconds: 50), () {
+              if (_keepListening) _startEngine();
+            });
+          }
         },
         onError: (e) {
           if (!_errors.isClosed) _errors.add(e.errorMsg);
@@ -47,33 +69,29 @@ class SpeechService {
     return _initialized;
   }
 
-  /// Begins listening; emits partial + final transcripts as they arrive.
-  Stream<String> listen() {
-    _transcripts?.close();
-    final controller = StreamController<String>.broadcast();
-    _transcripts = controller;
+  void _snapshotChunk() {
+    if (_currentChunk.isEmpty) return;
+    _cumulative = _cumulative.isEmpty
+        ? _currentChunk
+        : '$_cumulative $_currentChunk';
+    _currentChunk = '';
+  }
 
+  void _startEngine() {
     try {
-      // Walkie-talkie semantics: keep listening while the user holds the
-      // PTT button. Defaults are tuned for short single-utterance use cases
-      // and auto-stop after ~3s of silence — wrong for hold-to-talk.
-      //
-      //   listenFor: max session duration. Set to 5min as a safety; the
-      //              user will release long before that under normal use.
-      //   pauseFor:  silence-detection timeout. Default ~3s ends the
-      //              session if the user pauses to think mid-sentence.
-      //              Bumped to 60s so long pauses don't kill the capture.
-      //   listenMode.dictation: continuous mode (vs. confirmation) so STT
-      //              keeps emitting partials and doesn't self-terminate
-      //              after a single phrase.
       _speech.listen(
         onResult: (result) {
-          if (controller.isClosed) return;
-          controller.add(result.recognizedWords);
+          final c = _transcripts;
+          if (c == null || c.isClosed) return;
+          _currentChunk = result.recognizedWords;
+          final combined = _cumulative.isEmpty
+              ? _currentChunk
+              : '$_cumulative $_currentChunk';
+          c.add(combined);
         },
-        listenFor: const Duration(minutes: 5),
-        pauseFor: const Duration(seconds: 60),
         listenOptions: stt.SpeechListenOptions(
+          listenFor: const Duration(minutes: 5),
+          pauseFor: const Duration(seconds: 60),
           partialResults: true,
           cancelOnError: true,
           listenMode: stt.ListenMode.dictation,
@@ -82,14 +100,38 @@ class SpeechService {
     } catch (e) {
       _errors.add('listen threw: $e');
     }
+  }
+
+  /// Begins listening; emits the cumulative transcript as it grows. The
+  /// engine is auto-restarted internally when Android terminates it on
+  /// silence — caller sees one continuous stream until [stop] is called.
+  Stream<String> listen() {
+    _transcripts?.close();
+    final controller = StreamController<String>.broadcast();
+    _transcripts = controller;
+    _cumulative = '';
+    _currentChunk = '';
+    _keepListening = true;
+    _startEngine();
     return controller.stream;
   }
 
+  /// Stops listening and ensures the listener receives the full final
+  /// transcript before the stream closes. Await this; by the time it
+  /// returns, the last emitted transcript reflects everything captured.
   Future<void> stop() async {
+    _keepListening = false;
     try {
       await _speech.stop();
     } catch (e) {
       _errors.add('stop threw: $e');
+    }
+    // Give the platform a beat to deliver its final onResult after stop().
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    _snapshotChunk();
+    final c = _transcripts;
+    if (c != null && !c.isClosed && _cumulative.isNotEmpty) {
+      c.add(_cumulative);
     }
     await _transcripts?.close();
     _transcripts = null;

@@ -4,7 +4,6 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http;
 
 import '../config.dart';
-import '../models/voice_option.dart';
 
 /// Wraps `POST {API_BASE_URL}/tts` on the regi-api backend.
 ///
@@ -98,29 +97,6 @@ class TtsService {
       await _player.play(BytesSource(bytes));
     } catch (e) {
       throw TtsException('playback failed: $e');
-    }
-  }
-
-  /// Fetches the curated voice catalog from `GET {API_BASE_URL}/tts/voices`.
-  /// Returns an empty list on any failure (logs nothing — caller decides how
-  /// loudly to fail).
-  Future<List<VoiceOption>> fetchVoices({required String jwt}) async {
-    if (_baseUrl.isEmpty) return const [];
-    try {
-      final res = await http.get(
-        Uri.parse('$_baseUrl/tts/voices'),
-        headers: {'Authorization': 'Bearer $jwt'},
-      );
-      if (res.statusCode != 200) return const [];
-      final decoded = jsonDecode(res.body);
-      if (decoded is! List) return const [];
-      return decoded
-          .whereType<Map<String, dynamic>>()
-          .map(VoiceOption.fromJson)
-          .where((v) => v.id.isNotEmpty)
-          .toList();
-    } catch (_) {
-      return const [];
     }
   }
 

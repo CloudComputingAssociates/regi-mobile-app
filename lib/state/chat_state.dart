@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
-import '../models/voice_option.dart';
 
 class ChatState extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
@@ -12,8 +11,6 @@ class ChatState extends ChangeNotifier {
   bool _isListening = false;
   String? _sessionId;
   String _currentInput = '';
-  List<VoiceOption> _availableVoices = const [];
-  VoiceOption? _selectedVoice;
   bool _ttsEnabled = true;
   double _ttsRate = 1.25;
 
@@ -24,8 +21,6 @@ class ChatState extends ChangeNotifier {
   bool get isListening => _isListening;
   String? get sessionId => _sessionId;
   String get currentInput => _currentInput;
-  List<VoiceOption> get availableVoices => _availableVoices;
-  VoiceOption? get selectedVoice => _selectedVoice;
   bool get ttsEnabled => _ttsEnabled;
   double get ttsRate => _ttsRate;
 
@@ -91,26 +86,6 @@ class ChatState extends ChangeNotifier {
 
   void completeStream(StreamingTextMessage msg) {
     msg.isComplete = true;
-    notifyListeners();
-  }
-
-  /// Replaces the available voice list. Defaults [_selectedVoice] to the first
-  /// entry when no voice is currently selected (or when the previously
-  /// selected one is no longer in the catalog).
-  void setAvailableVoices(List<VoiceOption> voices) {
-    _availableVoices = List.unmodifiable(voices);
-    if (voices.isEmpty) {
-      _selectedVoice = null;
-    } else if (_selectedVoice == null ||
-        !voices.any((v) => v.id == _selectedVoice!.id)) {
-      _selectedVoice = voices.first;
-    }
-    notifyListeners();
-  }
-
-  void setSelectedVoice(VoiceOption voice) {
-    if (_selectedVoice?.id == voice.id) return;
-    _selectedVoice = voice;
     notifyListeners();
   }
 
