@@ -123,3 +123,4 @@ app.*.symbols
 # IntelliJ / Android Studio
 .idea/
 *.iml
+run-regi.sh

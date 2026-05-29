@@ -85,6 +85,8 @@ class TtsService {
       throw TtsException('response missing audioBase64');
     }
 
+    final mimeType = decoded['mimeType'] as String? ?? 'audio/mpeg';
+
     try {
       final bytes = base64Decode(b64);
       // Defensive: tear down any in-flight playback before starting a new
@@ -92,9 +94,11 @@ class TtsService {
       // same AudioPlayer can result in overlapping audio elements (the
       // previous blob URL not yet released). stop() + release-mode reset
       // guarantees the player is in a clean state per synthesis.
+      // iOS AVPlayer requires explicit MIME for in-memory bytes (Android
+      // MediaPlayer sniffs the format from byte signature; iOS does not).
       await _player.stop();
       await _player.setReleaseMode(ReleaseMode.release);
-      await _player.play(BytesSource(bytes));
+      await _player.play(BytesSource(bytes, mimeType: mimeType));
     } catch (e) {
       throw TtsException('playback failed: $e');
     }
