@@ -13,6 +13,7 @@ class ChatState extends ChangeNotifier {
   String _currentInput = '';
   bool _ttsEnabled = true;
   double _ttsRate = 1.25;
+  String? _activeBloom;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -23,6 +24,7 @@ class ChatState extends ChangeNotifier {
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
   double get ttsRate => _ttsRate;
+  String? get activeBloom => _activeBloom;
 
   void setMode(InputMode mode) {
     if (_mode == mode) return;
@@ -48,6 +50,17 @@ class ChatState extends ChangeNotifier {
   void setListening(bool listening) {
     if (_isListening == listening) return;
     _isListening = listening;
+    notifyListeners();
+  }
+
+  void openBloom(String key) {
+    _activeBloom = key;
+    notifyListeners();
+  }
+
+  void closeBloom() {
+    if (_activeBloom == null) return;
+    _activeBloom = null;
     notifyListeners();
   }
 

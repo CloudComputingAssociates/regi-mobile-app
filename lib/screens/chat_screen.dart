@@ -364,6 +364,12 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         actions: [
           IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Preferences',
+            onPressed: () =>
+                context.read<ChatState>().openBloom('preferences'),
+          ),
+          IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: 'Clear',
             onPressed: _handleNewChat,
@@ -387,6 +393,39 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ],
           ),
+          if (state.activeBloom != null)
+            Positioned(
+              left: 16,
+              right: 16,
+              top: 16,
+              bottom: 240,
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF252525),
+                    border: Border.all(color: Colors.white, width: 3),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'BLOOM: ${state.activeBloom}',
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              context.read<ChatState>().closeBloom(),
+                          child: const Text('Close'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
           if (showPtt)
             Positioned(
               left: 0,
