@@ -15,6 +15,7 @@ import '../state/chat_state.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
+import '../widgets/preferences_panel.dart';
 import '../widgets/ptt_button.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
@@ -51,6 +52,18 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _skipClearPrefKey = 'clear_confirm_skip';
   bool _skipClearConfirm = false;
 
+  // PTT button relocation: parent owns position + persistence; the button
+  // only reports drag deltas upward.
+  static const _pttOffsetXKey = 'ptt_offset_x';
+  static const _pttOffsetYKey = 'ptt_offset_y';
+  static const _pttButtonSize = 90.0;
+  static const _pttDragInactivityTimeout = Duration(seconds: 5);
+  static const _pttDefaultBottomInset = 210.0;
+
+  Offset? _pttPosition;
+  bool _pttDragMode = false;
+  Timer? _pttDragTimer;
+
   // Prepended to EVERY user message — models drift mid-session and stop
   // honoring a one-shot directive after a few turns. The model itself
   // routes: terse for chitchat, complete for recipes/instructions.
@@ -81,6 +94,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
     _loadSkipClearPref();
+    _loadPttPosition();
   }
 
   Future<void> _loadSkipClearPref() async {
@@ -91,16 +105,79 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  Future<void> _loadPttPosition() async {
+    final prefs = await SharedPreferences.getInstance();
+    final x = prefs.getDouble(_pttOffsetXKey);
+    final y = prefs.getDouble(_pttOffsetYKey);
+    if (!mounted) return;
+    if (x != null && y != null) {
+      setState(() => _pttPosition = Offset(x, y));
+    }
+  }
+
   @override
   void dispose() {
     _speechSub?.cancel();
     _speechStatusSub?.cancel();
+    _pttDragTimer?.cancel();
     _speech.stop();
     _speech.dispose();
     _chat.dispose();
     _tts.dispose();
     _micLevels.dispose();
     super.dispose();
+  }
+
+  Offset _defaultPttPosition(Size screen) {
+    return Offset(
+      (screen.width - _pttButtonSize) / 2,
+      screen.height - _pttDefaultBottomInset - _pttButtonSize,
+    );
+  }
+
+  Offset _clampPttPosition(Offset pos, Size screen) {
+    final maxX = (screen.width - _pttButtonSize).clamp(0.0, double.infinity);
+    final maxY = (screen.height - _pttButtonSize).clamp(0.0, double.infinity);
+    return Offset(
+      pos.dx.clamp(0.0, maxX),
+      pos.dy.clamp(0.0, maxY),
+    );
+  }
+
+  void _armPttDragTimer() {
+    _pttDragTimer?.cancel();
+    _pttDragTimer = Timer(_pttDragInactivityTimeout, _exitPttDragMode);
+  }
+
+  void _handlePttEnterDragMode() {
+    setState(() => _pttDragMode = true);
+    _armPttDragTimer();
+  }
+
+  void _exitPttDragMode() {
+    _pttDragTimer?.cancel();
+    _pttDragTimer = null;
+    if (!mounted || !_pttDragMode) return;
+    setState(() => _pttDragMode = false);
+    final pos = _pttPosition;
+    if (pos != null) {
+      unawaited(_persistPttPosition(pos));
+    }
+  }
+
+  Future<void> _persistPttPosition(Offset pos) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_pttOffsetXKey, pos.dx);
+    await prefs.setDouble(_pttOffsetYKey, pos.dy);
+  }
+
+  void _handlePttDragMove(Offset delta) {
+    _armPttDragTimer();
+    final screen = MediaQuery.of(context).size;
+    final current = _pttPosition ?? _defaultPttPosition(screen);
+    setState(() {
+      _pttPosition = _clampPttPosition(current + delta, screen);
+    });
   }
 
   Future<void> _sendMessage(String text) async {
@@ -325,10 +402,25 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // Mute button is dual-purpose: it flips the ttsEnabled flag AND abends
+  // any in-flight playback. Tapping mid-utterance must silence audio
+  // immediately, not just affect the NEXT reply. _tts.stop() tears down
+  // the audioplayers source (releases the in-memory MP3) so the user is
+  // not stuck listening to a long reply they don't want.
+  void _handleTtsToggle() {
+    unawaited(_tts.stop());
+    context.read<ChatState>().toggleTts();
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
     final showPtt = state.mode == InputMode.voice;
+    final screenSize = MediaQuery.of(context).size;
+    final pttPos = _clampPttPosition(
+      _pttPosition ?? _defaultPttPosition(screenSize),
+      screenSize,
+    );
 
     return Scaffold(
       backgroundColor: const Color(0xFF1B1B1B),
@@ -390,6 +482,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 onSend: _sendMessage,
                 onTalkStart: _handleTalkStart,
                 onTalkEnd: _handleTalkEnd,
+                onTtsToggle: _handleTtsToggle,
               ),
             ],
           ),
@@ -401,41 +494,82 @@ class _ChatScreenState extends State<ChatScreen> {
               bottom: 240,
               child: Material(
                 color: Colors.transparent,
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF252525),
-                    border: Border.all(color: Colors.white, width: 3),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          'BLOOM: ${state.activeBloom}',
-                          style: const TextStyle(color: Colors.white),
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Positioned.fill(
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF252525),
+                          border: Border.all(color: Colors.white, width: 3),
+                          borderRadius: BorderRadius.circular(20),
                         ),
-                        TextButton(
-                          onPressed: () =>
-                              context.read<ChatState>().closeBloom(),
-                          child: const Text('Close'),
-                        ),
-                      ],
+                        clipBehavior: Clip.antiAlias,
+                        child: state.activeBloom == 'preferences'
+                            ? const PreferencesPanel()
+                            : Center(
+                                child: Text(
+                                  'BLOOM: ${state.activeBloom}',
+                                  style: const TextStyle(color: Colors.white),
+                                ),
+                              ),
+                      ),
                     ),
-                  ),
+                    // macOS-style close: tiny red circle sitting on the top-
+                    // left corner of the frame. 32 px hit area, 16 px visible
+                    // dot. Negative offsets push the visible dot onto the
+                    // rounded border so it reads as part of the window chrome.
+                    Positioned(
+                      left: -8,
+                      top: -8,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () =>
+                            context.read<ChatState>().closeBloom(),
+                        child: SizedBox(
+                          width: 32,
+                          height: 32,
+                          child: Center(
+                            child: Container(
+                              width: 16,
+                              height: 16,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFFF5F57),
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black45,
+                                    blurRadius: 2,
+                                    offset: Offset(0, 1),
+                                  ),
+                                ],
+                              ),
+                              alignment: Alignment.center,
+                              child: const Icon(
+                                Icons.close,
+                                size: 10,
+                                color: Color(0xCC4A0000),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ),
           if (showPtt)
             Positioned(
-              left: 0,
-              right: 0,
-              bottom: 210,
-              child: Center(
-                child: PttButton(
-                  onPressStart: _handleTalkStart,
-                  onPressEnd: _handleTalkEnd,
-                ),
+              left: pttPos.dx,
+              top: pttPos.dy,
+              child: PttButton(
+                dragMode: _pttDragMode,
+                onPressStart: _handleTalkStart,
+                onPressEnd: _handleTalkEnd,
+                onEnterDragMode: _handlePttEnterDragMode,
+                onExitDragMode: _exitPttDragMode,
+                onDragMove: _handlePttDragMove,
               ),
             ),
         ],

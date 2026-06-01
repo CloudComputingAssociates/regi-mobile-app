@@ -14,11 +14,17 @@ class ChatInput extends StatefulWidget {
     required this.onSend,
     required this.onTalkStart,
     required this.onTalkEnd,
+    required this.onTtsToggle,
   });
 
   final void Function(String text) onSend;
   final VoidCallback onTalkStart;
   final VoidCallback onTalkEnd;
+
+  /// Tapped on the mute button. Owner is expected to both flip the
+  /// ttsEnabled flag AND abend any in-flight TTS playback so a user
+  /// toggling mid-utterance gets immediate silence, not "next time".
+  final VoidCallback onTtsToggle;
 
   @override
   State<ChatInput> createState() => _ChatInputState();
@@ -96,7 +102,7 @@ class _ChatInputState extends State<ChatInput> {
                 const SizedBox(width: 6),
                 _MuteButton(
                   enabled: state.ttsEnabled,
-                  onTap: state.toggleTts,
+                  onTap: widget.onTtsToggle,
                 ),
                 const Spacer(),
                 ModeSlider(
