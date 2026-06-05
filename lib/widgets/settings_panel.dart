@@ -7,17 +7,17 @@ import 'package:provider/provider.dart';
 import '../services/auth_service.dart';
 import '../services/settings_service.dart';
 
-/// Read-only view of the user's preferences (Personal Info, Nutrition
+/// Read-only view of the user's settings (Personal Info, Nutrition
 /// Targets, RegiMenu + Planning). Editing lives at app.regimenu.com —
 /// this panel fetches once on mount and renders display text only.
-class PreferencesPanel extends StatefulWidget {
-  const PreferencesPanel({super.key});
+class SettingsPanel extends StatefulWidget {
+  const SettingsPanel({super.key});
 
   @override
-  State<PreferencesPanel> createState() => _PreferencesPanelState();
+  State<SettingsPanel> createState() => _SettingsPanelState();
 }
 
-class _PreferencesPanelState extends State<PreferencesPanel> {
+class _SettingsPanelState extends State<SettingsPanel> {
   final SettingsService _service = SettingsService();
   late final Future<Map<String, dynamic>> _future;
 
@@ -65,7 +65,7 @@ class _PreferencesPanelState extends State<PreferencesPanel> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text(
-                    'Could not load preferences',
+                    'Could not load settings',
                     style: TextStyle(color: Colors.white, fontSize: 16),
                   ),
                   const SizedBox(height: 8),

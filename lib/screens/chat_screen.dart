@@ -15,13 +15,13 @@ import '../state/chat_state.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
-import '../widgets/preferences_panel.dart';
+import '../widgets/settings_panel.dart';
 import '../widgets/ptt_button.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
 // services/external_apis/gcp_tts_service.go. Voice selection UI is
-// deferred to v1.2 (App Preferences).
+// deferred to v1.2 (App Settings).
 // Temporarily James (Neural2-D, default) to test whether Neural2-J specifically
 // is failing in this GCP project. Once confirmed, swap back to Neural2-J.
 const String _pinnedVoiceId = 'en-US-Neural2-D';
@@ -457,9 +457,9 @@ class _ChatScreenState extends State<ChatScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'Preferences',
+            tooltip: 'Settings',
             onPressed: () =>
-                context.read<ChatState>().openBloom('preferences'),
+                context.read<ChatState>().openBloom('settings'),
           ),
           IconButton(
             icon: const Icon(Icons.clear_all),
@@ -505,8 +505,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         clipBehavior: Clip.antiAlias,
-                        child: state.activeBloom == 'preferences'
-                            ? const PreferencesPanel()
+                        child: state.activeBloom == 'settings'
+                            ? const SettingsPanel()
                             : Center(
                                 child: Text(
                                   'BLOOM: ${state.activeBloom}',
@@ -520,19 +520,19 @@ class _ChatScreenState extends State<ChatScreen> {
                     // dot. Negative offsets push the visible dot onto the
                     // rounded border so it reads as part of the window chrome.
                     Positioned(
-                      left: -8,
-                      top: -8,
+                      left: -10,
+                      top: -10,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
                         onTap: () =>
                             context.read<ChatState>().closeBloom(),
                         child: SizedBox(
-                          width: 32,
-                          height: 32,
+                          width: 36,
+                          height: 36,
                           child: Center(
                             child: Container(
-                              width: 16,
-                              height: 16,
+                              width: 22,
+                              height: 22,
                               decoration: const BoxDecoration(
                                 color: Color(0xFFFF5F57),
                                 shape: BoxShape.circle,
@@ -547,8 +547,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               alignment: Alignment.center,
                               child: const Icon(
                                 Icons.close,
-                                size: 10,
-                                color: Color(0xCC4A0000),
+                                size: 14,
+                                color: Color(0xFF4A0000),
                               ),
                             ),
                           ),
