@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../../services/auth_service.dart';
 import '../../services/settings_service.dart';
+import '../../utils/units.dart';
 
 /// Bloom content: read-only view of the user's settings (Personal Info,
 /// Nutrition Targets, RegiMenu + Planning). Editing lives at
@@ -421,7 +422,7 @@ class _UserSettingsState extends State<UserSettings> {
   String _formatWeight(num? kg, bool isMetric) {
     if (kg == null) return '—';
     if (isMetric) return '${_fmtNum(kg)} kg';
-    return '${(kg * 2.20462).round()} lbs';
+    return '${kgToLbs(kg).round()} lbs';
   }
 
   String? _formatWeightDelta(num? currentKg, num? targetKg, bool isMetric) {
@@ -432,7 +433,7 @@ class _UserSettingsState extends State<UserSettings> {
       if (rounded == 0) return '±0 kg';
       return '${rounded > 0 ? '+' : '−'}${rounded.abs()} kg';
     }
-    final lbs = (deltaKg * 2.20462).round();
+    final lbs = kgToLbs(deltaKg).round();
     if (lbs == 0) return '±0 lbs';
     return '${lbs > 0 ? '+' : '−'}${lbs.abs()} lbs';
   }

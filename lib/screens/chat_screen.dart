@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -12,9 +13,11 @@ import '../services/chat_service.dart';
 import '../services/command_service.dart';
 import '../services/conversation_sink.dart';
 import '../services/mic_level_service.dart';
+import '../services/settings_service.dart';
 import '../services/speech_service.dart';
 import '../services/tts_service.dart' show TtsService, TtsException;
 import '../state/chat_state.dart';
+import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
@@ -39,6 +42,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
+  final SettingsService _settings = SettingsService();
   final SpeechService _speech = SpeechService();
   final TtsService _tts = TtsService();
   // RAG seam — today a no-op. Every user/assistant turn flows through
@@ -51,6 +55,18 @@ class _ChatScreenState extends State<ChatScreen> {
   // case the gate verdict is treated as "not understood" and the
   // utterance degrades to the chat pipeline.
   static const Set<String> _knownCommands = {'bloom', 'set'};
+
+  // Fields whose backend storage is kg. When the user's units are 'us'
+  // the spoken value arrives in pounds and must be converted before we
+  // PUT. Anything outside this set is passed through verbatim.
+  static const Set<String> _kgFields = {'currentWeightKg', 'targetWeightKg'};
+
+  // Bumped after a successful `set` write so the UserSettings bloom
+  // remounts and re-fetches. Without a key change, calling
+  // openBloom('UserSettings') while the bloom is already open is a
+  // no-op for the panel — Flutter reuses the existing element and the
+  // cached Future, so the user would see stale numbers.
+  int _userSettingsRev = 0;
   // Constructed but currently dormant — see _handleTalkStart for why
   // start() is not called. Kept wired (import + dispose) so re-enabling
   // is a one-line change once the recognizer/analyser conflict is solved.
@@ -138,6 +154,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _speech.dispose();
     _chat.dispose();
     _command.dispose();
+    _settings.dispose();
     _tts.dispose();
     _micLevels.dispose();
     super.dispose();
@@ -260,20 +277,151 @@ class _ChatScreenState extends State<ChatScreen> {
         state.openBloom(r.widget ?? 'UserSettings');
         _regiSay(r.response);
       case 'set':
-        // Set is PLUMBED, not executed. The parameterized settings-field
-        // endpoint + front-end units conversion are a separate story —
-        // when they land, swap this debugPrint for an actual call
-        // dispatch using r.call. For now we bloom the target surface so
-        // the user sees what would change, speak the gate's
-        // confirmation, and log the intended call.
-        state.openBloom(r.widget ?? 'UserSettings');
-        _regiSay(r.response);
-        debugPrint(
-          '[set NYI] would call: ${r.call?.method} ${r.call?.endpoint} '
-          'body=${r.call?.body}',
-        );
-      // TODO(set): execute r.call once the write surface lands.
+        await _executeSet(r);
     }
+  }
+
+  // The 'set' command executor: GET units → convert lbs→kg if needed →
+  // PUT the single field → re-bloom UserSettings (forcing a remount so
+  // the panel re-fetches) → speak the gate's confirmation. On any
+  // failure short of crashing — bad call body, GET fails, PUT non-200,
+  // network error — we speak a short failure line and surface the
+  // detail as an assistant message so the user always hears something
+  // and we always leave a debug trail.
+  Future<void> _executeSet(UtteranceResult r) async {
+    final state = context.read<ChatState>();
+    final auth = context.read<AuthService>();
+
+    final call = r.call;
+    if (call == null || call.body == null || call.body!.isEmpty) {
+      _setFailed('missing call/body in gate response');
+      return;
+    }
+
+    // Parse the call body. Gate currently sends value as a JSON STRING
+    // (e.g. "185"); _parseSpoken accepts num OR numeric string.
+    String? field;
+    num? spoken;
+    try {
+      final decoded = jsonDecode(call.body!);
+      if (decoded is Map<String, dynamic>) {
+        final f = decoded['field'];
+        field = (f is String && f.isNotEmpty) ? f : null;
+        spoken = _parseSpoken(decoded['value']);
+      }
+    } catch (_) {
+      // fall through to the guard below
+    }
+    if (field == null || spoken == null) {
+      _setFailed('could not parse field/value from ${call.body}');
+      return;
+    }
+
+    final jwt = await auth.getAccessToken();
+    if (jwt == null) {
+      _setFailed('not authenticated');
+      return;
+    }
+
+    // 1) GET to read the user's stored units so we know whether the
+    //    spoken number was lbs (us) or kg (metric).
+    String units;
+    try {
+      final settings = await _settings.fetchAllSettings(jwt);
+      final personal = settings['personalInfo'];
+      units = (personal is Map && personal['units'] is String)
+          ? personal['units'] as String
+          : 'us';
+    } catch (e) {
+      _setFailed('could not read units: $e');
+      return;
+    }
+
+    // 2) Convert if needed. Backend stores kg verbatim; client converts.
+    //    For us units, weight kg fields arrive as pounds and must be
+    //    divided by lbsPerKg. Non-weight fields pass through as-is.
+    final valueKg = _toBackendValue(field, spoken, units);
+
+    // 3) PUT. Endpoint comes from the gate (currently 'api/user/settings/
+    //    field') so the manifest can evolve without a client release.
+    try {
+      await _settings.setField(
+        endpoint: call.endpoint,
+        field: field,
+        value: valueKg,
+        jwt: jwt,
+      );
+    } catch (e) {
+      _setFailed(_formatSetError(e));
+      return;
+    }
+
+    // 4) Re-bloom UserSettings. Bump the rev key so an already-open
+    //    bloom is force-remounted and its FutureBuilder runs a fresh
+    //    fetch — without this, openBloom on an already-open bloom is a
+    //    no-op for the panel content.
+    if (!mounted) return;
+    setState(() => _userSettingsRev++);
+    state.openBloom(r.widget ?? 'UserSettings');
+
+    // 5) Speak the gate's confirmation. r.response is always populated
+    //    for understood commands; fall back to a generic line if not.
+    _regiSay(r.response.isNotEmpty ? r.response : 'Done.');
+  }
+
+  void _setFailed(String detail) {
+    debugPrint('[set failed] $detail');
+    _regiSay("I couldn't update that.");
+    if (!mounted) return;
+    context.read<ChatState>().addMessage(TextMessage(
+          content: '[set] $detail',
+          role: MessageRole.assistant,
+        ));
+  }
+
+  // Parses the spoken value carried in r.call.body. Gate currently
+  // emits it as a string; tolerate both string and num shapes so a
+  // future gate revision can switch without a client change.
+  num? _parseSpoken(dynamic v) {
+    if (v == null) return null;
+    if (v is num) return v;
+    if (v is String) {
+      final t = v.trim();
+      if (t.isEmpty) return null;
+      return num.tryParse(t);
+    }
+    return null;
+  }
+
+  // Returns the numeric value to send to the backend. Weight kg fields
+  // under us units convert lbs→kg, rounded to 1 decimal (sensible for
+  // bodyweight). Everything else passes through unchanged.
+  num _toBackendValue(String field, num spoken, String units) {
+    if (_kgFields.contains(field) && units == 'us') {
+      final kg = lbsToKg(spoken);
+      return double.parse(kg.toStringAsFixed(1));
+    }
+    return spoken;
+  }
+
+  // Pretty-prints a backend error for the assistant detail message.
+  // The backend may return a structured body like
+  //   { "error": "unsettable_field" }
+  // or a plain string. Either way, surface the status + something
+  // readable.
+  String _formatSetError(Object error) {
+    if (error is SettingsException) {
+      try {
+        final body = jsonDecode(error.body);
+        if (body is Map && body['error'] is String) {
+          return 'HTTP ${error.statusCode}: ${body['error']}';
+        }
+      } catch (_) {
+        // body wasn't JSON; fall through to raw
+      }
+      return 'HTTP ${error.statusCode}: ${error.body}';
+    }
+    return '$error';
   }
 
   // Display + speak a Regi utterance. Mirrors the TTS code path in
@@ -626,7 +774,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                         clipBehavior: Clip.antiAlias,
                         child: state.activeBloom == 'UserSettings'
-                            ? const UserSettings()
+                            ? UserSettings(
+                                key: ValueKey(_userSettingsRev),
+                              )
                             : Center(
                                 child: Text(
                                   'BLOOM: ${state.activeBloom}',
