@@ -6,8 +6,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
+import '../models/utterance_result.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
+import '../services/command_service.dart';
+import '../services/conversation_sink.dart';
 import '../services/mic_level_service.dart';
 import '../services/speech_service.dart';
 import '../services/tts_service.dart' show TtsService, TtsException;
@@ -15,7 +18,7 @@ import '../state/chat_state.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
-import '../widgets/settings_panel.dart';
+import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
@@ -35,8 +38,19 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final ChatService _chat = ChatService();
+  final CommandService _command = CommandService();
   final SpeechService _speech = SpeechService();
   final TtsService _tts = TtsService();
+  // RAG seam — today a no-op. Every user/assistant turn flows through
+  // recordTurn so that when the background-queue + Weaviate pipeline
+  // lands, only this one binding swaps.
+  final ConversationSink _sink = const NoopConversationSink();
+
+  // Commands the client knows how to execute. The server may classify
+  // an utterance as a command name we don't (yet) recognise; in that
+  // case the gate verdict is treated as "not understood" and the
+  // utterance degrades to the chat pipeline.
+  static const Set<String> _knownCommands = {'bloom', 'set'};
   // Constructed but currently dormant — see _handleTalkStart for why
   // start() is not called. Kept wired (import + dispose) so re-enabling
   // is a one-line change once the recognizer/analyser conflict is solved.
@@ -123,6 +137,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _speech.stop();
     _speech.dispose();
     _chat.dispose();
+    _command.dispose();
     _tts.dispose();
     _micLevels.dispose();
     super.dispose();
@@ -180,14 +195,119 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  // Single funnel for typed AND voice utterances. Both ChatInput.onSend
+  // and _handleTalkEnd route here. The COMMAND GATE runs first; if the
+  // server classifies the utterance as an app command we know how to
+  // execute, we handle it and short-circuit. Anything else (not a
+  // command, server unsure, gate failure, no JWT) falls through to the
+  // existing chat pipeline UNCHANGED.
   Future<void> _sendMessage(String text) async {
     if (_sending) return;
     _sending = true;
     try {
+      final auth = context.read<AuthService>();
+      final jwt = await auth.getAccessToken();
+      if (jwt == null) {
+        // No JWT — can't query the gate. Hand straight to _doSendMessage
+        // so the existing not-authenticated handling (user-message +
+        // assistant 'Not authenticated' note) runs byte-for-byte as
+        // today.
+        await _doSendMessage(text);
+        return;
+      }
+
+      // Command gate. Failures inside interpret() degrade silently to
+      // notUnderstood — the user must never be blocked from chatting
+      // because the gate is unreachable.
+      final result = await _command.interpret(utterance: text, jwt: jwt);
+
+      if (result.understood &&
+          result.command != null &&
+          _knownCommands.contains(result.command)) {
+        await _handleCommand(text, result);
+        return;
+      }
+
+      // Fall-through: not an app command. Record the user turn at the
+      // RAG seam, then let the chat pipeline take it from here. We do
+      // NOT call addMessage(user) here — _doSendMessage owns its own
+      // user-message append and the conversation list must remain
+      // single-sourced.
+      _sink.recordTurn(role: 'user', text: text);
       await _doSendMessage(text);
     } finally {
       _sending = false;
     }
+  }
+
+  // Executes a command-classified utterance. The user turn is recorded
+  // here (both in the visible message list and via the RAG sink) so
+  // command interactions show up in conversation history alongside
+  // chat turns. Regi's textual response is then displayed + spoken via
+  // [_regiSay].
+  Future<void> _handleCommand(String utterance, UtteranceResult r) async {
+    final state = context.read<ChatState>();
+    state.addMessage(TextMessage(content: utterance, role: MessageRole.user));
+    _sink.recordTurn(
+      role: 'user',
+      text: utterance,
+      command: r.command,
+      confidence: r.confidence,
+    );
+
+    switch (r.command) {
+      case 'bloom':
+        state.openBloom(r.widget ?? 'UserSettings');
+        _regiSay(r.response);
+      case 'set':
+        // Set is PLUMBED, not executed. The parameterized settings-field
+        // endpoint + front-end units conversion are a separate story —
+        // when they land, swap this debugPrint for an actual call
+        // dispatch using r.call. For now we bloom the target surface so
+        // the user sees what would change, speak the gate's
+        // confirmation, and log the intended call.
+        state.openBloom(r.widget ?? 'UserSettings');
+        _regiSay(r.response);
+        debugPrint(
+          '[set NYI] would call: ${r.call?.method} ${r.call?.endpoint} '
+          'body=${r.call?.body}',
+        );
+      // TODO(set): execute r.call once the write surface lands.
+    }
+  }
+
+  // Display + speak a Regi utterance. Mirrors the TTS code path in
+  // _doSendMessage (same _pinnedVoiceId + state.ttsRate, same fresh-JWT
+  // fetch, same TtsException handling) so command responses sound
+  // identical to chat replies. No-op on empty text.
+  void _regiSay(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    final state = context.read<ChatState>();
+    state.addMessage(TextMessage(content: text, role: MessageRole.assistant));
+    _sink.recordTurn(role: 'assistant', text: text);
+    if (!state.ttsEnabled) return;
+
+    final auth = context.read<AuthService>();
+    final rate = state.ttsRate;
+    unawaited(() async {
+      final jwt = await auth.getAccessToken();
+      if (jwt == null) return;
+      try {
+        await _tts.speak(
+          text,
+          jwt: jwt,
+          voice: _pinnedVoiceId,
+          speakingRate: rate,
+        );
+      } on TtsException catch (e) {
+        if (!mounted) return;
+        context.read<ChatState>().addMessage(TextMessage(
+              content: '[tts] $e',
+              role: MessageRole.assistant,
+            ));
+      }
+    }());
   }
 
   Future<void> _doSendMessage(String text) async {
@@ -459,7 +579,7 @@ class _ChatScreenState extends State<ChatScreen> {
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
             onPressed: () =>
-                context.read<ChatState>().openBloom('settings'),
+                context.read<ChatState>().openBloom('UserSettings'),
           ),
           IconButton(
             icon: const Icon(Icons.clear_all),
@@ -505,8 +625,8 @@ class _ChatScreenState extends State<ChatScreen> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         clipBehavior: Clip.antiAlias,
-                        child: state.activeBloom == 'settings'
-                            ? const SettingsPanel()
+                        child: state.activeBloom == 'UserSettings'
+                            ? const UserSettings()
                             : Center(
                                 child: Text(
                                   'BLOOM: ${state.activeBloom}',

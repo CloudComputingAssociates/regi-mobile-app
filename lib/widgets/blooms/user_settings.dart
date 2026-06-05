@@ -4,20 +4,21 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../services/auth_service.dart';
-import '../services/settings_service.dart';
+import '../../services/auth_service.dart';
+import '../../services/settings_service.dart';
 
-/// Read-only view of the user's settings (Personal Info, Nutrition
-/// Targets, RegiMenu + Planning). Editing lives at app.regimenu.com —
-/// this panel fetches once on mount and renders display text only.
-class SettingsPanel extends StatefulWidget {
-  const SettingsPanel({super.key});
+/// Bloom content: read-only view of the user's settings (Personal Info,
+/// Nutrition Targets, RegiMenu + Planning). Editing lives at
+/// app.regimenu.com — this fetches once on mount and renders display
+/// text only.
+class UserSettings extends StatefulWidget {
+  const UserSettings({super.key});
 
   @override
-  State<SettingsPanel> createState() => _SettingsPanelState();
+  State<UserSettings> createState() => _UserSettingsState();
 }
 
-class _SettingsPanelState extends State<SettingsPanel> {
+class _UserSettingsState extends State<UserSettings> {
   final SettingsService _service = SettingsService();
   late final Future<Map<String, dynamic>> _future;
 
