@@ -1,22 +1,26 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
+
 /// Reads config exclusively from compile-time `--dart-define` values.
 ///
-/// Local dev: pass them on the flutter command line, e.g.
-///   flutter run -d chrome --web-port=5000 \
-///     --dart-define=AUTH0_DOMAIN=dev-xxx.us.auth0.com \
-///     --dart-define=AUTH0_CLIENT_ID=... \
-///     --dart-define=AUTH0_AUDIENCE=https://api.regimenu.net \
-///     --dart-define=API_BASE_URL=https://api.regimenu.net/api
-///
-/// Netlify: same keys are set in Site settings → Environment variables, and
-/// netlify.toml expands them into --dart-define args at build time.
+/// Auth0 requires a separate Application per platform — web/PWA uses an
+/// Auth0 SPA app, Android/iOS use an Auth0 Native app. They have different
+/// Client IDs and different allowed-callback rules. We carry both in env
+/// (`AUTH0_CLIENT_ID_WEB`, `AUTH0_CLIENT_ID_NATIVE`) and pick at runtime
+/// via `kIsWeb`. AUTH0_DOMAIN, AUTH0_AUDIENCE, API_BASE_URL are shared.
 class Config {
   const Config._();
 
   static const String auth0Domain =
       String.fromEnvironment('AUTH0_DOMAIN');
 
-  static const String auth0ClientId =
-      String.fromEnvironment('AUTH0_CLIENT_ID');
+  static const String _auth0ClientIdWeb =
+      String.fromEnvironment('AUTH0_CLIENT_ID_WEB');
+
+  static const String _auth0ClientIdNative =
+      String.fromEnvironment('AUTH0_CLIENT_ID_NATIVE');
+
+  static String get auth0ClientId =>
+      kIsWeb ? _auth0ClientIdWeb : _auth0ClientIdNative;
 
   static const String auth0Audience =
       String.fromEnvironment('AUTH0_AUDIENCE');

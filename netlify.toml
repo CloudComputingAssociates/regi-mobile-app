@@ -2,14 +2,16 @@
   # All runtime config is delivered via --dart-define from Netlify env vars
   # (Site settings → Environment variables). lib/config.dart reads them with
   # const String.fromEnvironment(...). Set in Netlify:
-  #   AUTH0_DOMAIN, AUTH0_CLIENT_ID, AUTH0_AUDIENCE, API_BASE_URL
+  #   AUTH0_DOMAIN, AUTH0_CLIENT_ID_WEB, AUTH0_AUDIENCE, API_BASE_URL
+  # (AUTH0_CLIENT_ID_NATIVE is unused on web but harmless to set for parity.)
   command = """
     ([ -d _flutter ] || git clone https://github.com/flutter/flutter.git --depth 1 -b stable _flutter) && \
     export PATH="$PATH:$(pwd)/_flutter/bin" && \
     flutter pub get && \
     flutter build web --release \
       --dart-define=AUTH0_DOMAIN=$AUTH0_DOMAIN \
-      --dart-define=AUTH0_CLIENT_ID=$AUTH0_CLIENT_ID \
+      --dart-define=AUTH0_CLIENT_ID_WEB=$AUTH0_CLIENT_ID_WEB \
+      --dart-define=AUTH0_CLIENT_ID_NATIVE=$AUTH0_CLIENT_ID_NATIVE \
       --dart-define=AUTH0_AUDIENCE=$AUTH0_AUDIENCE \
       --dart-define=API_BASE_URL=$API_BASE_URL
   """
