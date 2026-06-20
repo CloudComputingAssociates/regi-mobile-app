@@ -692,6 +692,37 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Scaffold(
       backgroundColor: const Color(0xFF1B1B1B),
+      drawer: Drawer(
+        backgroundColor: const Color(0xFF252525),
+        child: SafeArea(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              const DrawerHeader(
+                decoration: BoxDecoration(color: Color(0xFF1B1B1B)),
+                child: Align(
+                  alignment: Alignment.bottomLeft,
+                  child: Text(
+                    'RegiMenu',
+                    style: TextStyle(color: Colors.white, fontSize: 20),
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.add, color: Colors.white),
+                title: const Text(
+                  'Add Food...',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  context.read<ChatState>().openBloom('AddFood');
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
@@ -777,12 +808,24 @@ class _ChatScreenState extends State<ChatScreen> {
                             ? UserSettings(
                                 key: ValueKey(_userSettingsRev),
                               )
-                            : Center(
-                                child: Text(
-                                  'BLOOM: ${state.activeBloom}',
-                                  style: const TextStyle(color: Colors.white),
-                                ),
-                              ),
+                            : state.activeBloom == 'AddFood'
+                                ? const Center(
+                                    child: Text(
+                                      'Add Food Placeholder',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 18,
+                                      ),
+                                    ),
+                                  )
+                                : Center(
+                                    child: Text(
+                                      'BLOOM: ${state.activeBloom}',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
                       ),
                     ),
                     // macOS-style close: tiny red circle sitting on the top-
