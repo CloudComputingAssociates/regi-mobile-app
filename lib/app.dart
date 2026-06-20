@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -45,7 +46,7 @@ class _RegiChatAppState extends State<RegiChatApp> {
         ChangeNotifierProvider<ChatState>.value(value: _chat),
       ],
       child: MaterialApp(
-        title: 'RegiMenu',
+        title: kIsWeb ? 'Mobile App' : 'RegiMenu',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
