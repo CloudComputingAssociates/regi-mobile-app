@@ -70,7 +70,13 @@ class _JournalEntryState extends State<JournalEntry> {
   String _weightUnit = 'lb';
   XFile? _photo;
   Uint8List? _photoBytes;
+  // Photo signed URL returned by the GET for today's entry. Shown as a
+  // network image preview when the user hasn't picked a new photo. The
+  // upsert POST does NOT touch photo state; deletion is a separate
+  // PUT/DELETE on /api/journal/{id}/photo (not wired here).
+  String? _existingPhotoUrl;
   bool _isSaving = false;
+  bool _isLoading = true;
   String? _saveError;
 
   // Snapshot of _thoughts.text taken at mic-press (sink.onStart). The
@@ -94,12 +100,76 @@ class _JournalEntryState extends State<JournalEntry> {
         _thoughtsPrefix.isEmpty ? c : '$_thoughtsPrefix $c',
       ),
       onFinal: (text) {
-        final combined =
-            _thoughtsPrefix.isEmpty ? text : '$_thoughtsPrefix $text';
+        final combined = _thoughtsPrefix.isEmpty
+            ? text
+            : '$_thoughtsPrefix${_separatorAfter(_thoughtsPrefix)}$text';
         _setThoughtsText(combined);
         _thoughtsPrefix = combined;
       },
     ));
+    unawaited(_loadTodayEntry());
+  }
+
+  /// Cross-device coherence: GETs today's entry on mount so a user who
+  /// saved on the web sees the same state on the phone. Empty result
+  /// → blank form; populated → pre-fill every field + remember the id.
+  /// Silent on failure so a flaky network doesn't block journaling.
+  Future<void> _loadTodayEntry() async {
+    try {
+      final jwt = await context.read<AuthService>().getAccessToken();
+      if (jwt == null) {
+        if (mounted) setState(() => _isLoading = false);
+        return;
+      }
+      final existing = await _service.getTodayEntry(jwt);
+      if (!mounted) return;
+      setState(() {
+        if (existing != null) _prefillFrom(existing);
+        _isLoading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  void _prefillFrom(model.JournalEntry e) {
+    _existingPhotoUrl = e.photoSignedUrl;
+    // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse the
+    // date portion only. Falls back to today on any parse problem.
+    final parsed = DateTime.tryParse(e.entryDate);
+    if (parsed != null) _entryDate = DateTime(parsed.year, parsed.month, parsed.day);
+    if (e.weight != null) {
+      final w = e.weight!;
+      _weight.text = w == w.roundToDouble()
+          ? w.toInt().toString()
+          : w.toStringAsFixed(1);
+    }
+    _weightUnit = e.weightUnit;
+    if (e.thoughts != null) _thoughts.text = e.thoughts!;
+    final m = e.measurements;
+    if (m != null) {
+      m.forEach((key, value) {
+        final c = _measurements[key];
+        if (c == null) return;
+        if (value is num) {
+          c.text = value == value.roundToDouble()
+              ? value.toInt().toString()
+              : value.toStringAsFixed(1);
+        } else if (value is String) {
+          c.text = value;
+        }
+      });
+    }
+  }
+
+  /// Picks the join character between existing text and an incoming
+  /// transcript. A newline after sentence punctuation reads as a new
+  /// thought; a space otherwise keeps mid-sentence dictation flowing.
+  String _separatorAfter(String base) {
+    final trimmed = base.trimRight();
+    if (trimmed.isEmpty) return '';
+    final last = trimmed[trimmed.length - 1];
+    return '.!?'.contains(last) ? '\n' : ' ';
   }
 
   @override
@@ -158,9 +228,15 @@ class _JournalEntryState extends State<JournalEntry> {
   }
 
   void _clearPhoto() {
+    // Hides BOTH a freshly-picked photo and the server-side existing
+    // photo from the local view. Server-side deletion of the existing
+    // photo is a separate DELETE on /api/journal/{id}/photo (not wired
+    // here); for now × is "remove from this view," save behaviour is
+    // unaffected since upsert doesn't touch photo state.
     setState(() {
       _photo = null;
       _photoBytes = null;
+      _existingPhotoUrl = null;
     });
   }
 
@@ -214,7 +290,7 @@ class _JournalEntryState extends State<JournalEntry> {
     }
 
     try {
-      final saved = await _service.createEntry(entry, jwt);
+      final saved = await _service.upsertEntry(entry, jwt);
       if (_photo != null &&
           _photoBytes != null &&
           saved.journalEntryId != null) {
@@ -278,6 +354,11 @@ class _JournalEntryState extends State<JournalEntry> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Center(
+        child: CircularProgressIndicator(color: Color(0xFFF2B33D)),
+      );
+    }
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
       child: Column(
@@ -363,7 +444,7 @@ class _JournalEntryState extends State<JournalEntry> {
             ),
           ],
         ),
-        if (_photoBytes != null) ...[
+        if (_photoBytes != null || _existingPhotoUrl != null) ...[
           const SizedBox(height: 10),
           SizedBox(
             width: 140,
@@ -374,7 +455,20 @@ class _JournalEntryState extends State<JournalEntry> {
                 Positioned.fill(
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: Image.memory(_photoBytes!, fit: BoxFit.cover),
+                    child: _photoBytes != null
+                        ? Image.memory(_photoBytes!, fit: BoxFit.cover)
+                        : Image.network(
+                            _existingPhotoUrl!,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: _inputFill,
+                              alignment: Alignment.center,
+                              child: const Icon(
+                                Icons.broken_image,
+                                color: Colors.white38,
+                              ),
+                            ),
+                          ),
                   ),
                 ),
                 Positioned(
@@ -414,10 +508,30 @@ class _JournalEntryState extends State<JournalEntry> {
   }
 
   Widget _thoughtsSection() {
+    final hasText = _thoughts.text.isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle('Thoughts'),
+        Row(
+          children: [
+            _sectionTitle('Thoughts'),
+            const Spacer(),
+            // Trash icon clears the local field immediately (optimistic).
+            // The cleared state is persisted on the next Save. Disabled
+            // when the field is empty so it doesn't draw the eye.
+            IconButton(
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              iconSize: 20,
+              icon: Icon(
+                Icons.delete_outline,
+                color: hasText ? Colors.white70 : Colors.white24,
+              ),
+              tooltip: 'Clear thoughts',
+              onPressed: hasText ? _clearThoughts : null,
+            ),
+          ],
+        ),
         TextField(
           controller: _thoughts,
           minLines: 3,
@@ -440,6 +554,48 @@ class _JournalEntryState extends State<JournalEntry> {
         ),
       ],
     );
+  }
+
+  Future<void> _clearThoughts() async {
+    // Soft confirmation only when there's meaningful content to lose.
+    // Threshold is arbitrary — 50 chars is "a sentence or two", below
+    // which a stray tap is recoverable by just retyping.
+    if (_thoughts.text.length > 50) {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: const Color(0xFF252525),
+          title: const Text(
+            'Clear thoughts?',
+            style: TextStyle(color: Colors.white),
+          ),
+          content: const Text(
+            "You'll lose what's there.",
+            style: TextStyle(color: Colors.white70),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text(
+                'Cancel',
+                style: TextStyle(color: Colors.white70),
+              ),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(
+                foregroundColor: Colors.white,
+                backgroundColor: const Color(0xFF8B1A2B),
+              ),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Clear'),
+            ),
+          ],
+        ),
+      );
+      if (ok != true) return;
+    }
+    _setThoughtsText('');
+    _thoughtsPrefix = '';
   }
 
   Widget _weightSection() {

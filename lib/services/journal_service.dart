@@ -24,10 +24,13 @@ class JournalService {
 
   final http.Client _client;
 
-  /// POST {base}/journal. Body is [JournalEntry.toCreateJson] — writable
-  /// fields only, nulls/empties dropped. The server returns the created
-  /// entry (with journalEntryId, createdAt, updatedAt populated).
-  Future<JournalEntry> createEntry(JournalEntry entry, String jwt) async {
+  /// POST {base}/journal — UPSERT by (userId, entryDate). The server
+  /// inserts a new row (201) or overwrites the existing row for the same
+  /// date (200). Both are success. Body is [JournalEntry.toUpsertJson] —
+  /// a complete write-over of every mutable field; anything absent is
+  /// stored as null. The response is always the full entry with
+  /// journalEntryId / createdAt / updatedAt populated.
+  Future<JournalEntry> upsertEntry(JournalEntry entry, String jwt) async {
     final base = Config.apiBaseUrl;
     if (base.isEmpty) {
       throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
@@ -38,9 +41,9 @@ class JournalService {
         'Authorization': 'Bearer $jwt',
         'Content-Type': 'application/json',
       },
-      body: jsonEncode(entry.toCreateJson()),
+      body: jsonEncode(entry.toUpsertJson()),
     );
-    if (res.statusCode != 201) {
+    if (res.statusCode != 200 && res.statusCode != 201) {
       throw JournalException(res.statusCode, res.body);
     }
     final decoded = jsonDecode(res.body);
@@ -51,6 +54,57 @@ class JournalService {
       );
     }
     return JournalEntry.fromJson(decoded);
+  }
+
+  /// GET {base}/journal?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=1 with the
+  /// device's LOCAL calendar date on both ends. Returns the entry for
+  /// today if one exists, else null. Used by the Journal overlay to
+  /// pre-fill the form so a user who saved on the web sees the same
+  /// state on the phone.
+  ///
+  /// Tolerant to two response shapes for safety:
+  ///   • top-level JSON array  → entries[0]
+  ///   • `{ "entries": [...] }` wrapper → wrapper.entries[0]
+  /// Anything else degrades to null (no crash, no entry).
+  Future<JournalEntry?> getTodayEntry(String jwt) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final today = _localDateString(DateTime.now());
+    final res = await _client.get(
+      Uri.parse('$base/journal?from=$today&to=$today&limit=1'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+    );
+    if (res.statusCode == 404) return null;
+    if (res.statusCode != 200) {
+      throw JournalException(res.statusCode, res.body);
+    }
+
+    final decoded = jsonDecode(res.body);
+    List<dynamic>? rows;
+    if (decoded is List) {
+      rows = decoded;
+    } else if (decoded is Map<String, dynamic> && decoded['entries'] is List) {
+      rows = decoded['entries'] as List<dynamic>;
+    }
+    if (rows == null || rows.isEmpty) return null;
+    final first = rows.first;
+    if (first is Map<String, dynamic>) return JournalEntry.fromJson(first);
+    if (first is Map) return JournalEntry.fromJson(first.cast<String, dynamic>());
+    return null;
+  }
+
+  /// LOCAL calendar date as YYYY-MM-DD. A user in PST opening the app at
+  /// 11:30pm should see the PST date, not the UTC-rolled-over date.
+  static String _localDateString(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$day';
   }
 
   /// PUT {base}/journal/{id}/photo as multipart/form-data, sending the

@@ -56,28 +56,34 @@ class JournalEntry {
     );
   }
 
-  /// Body for POST /api/journal. Only writable fields. Nulls and empties
-  /// are dropped so the server can distinguish "not set" from "explicitly
-  /// cleared". measurements is omitted entirely when the map is empty —
-  /// never sent as `{}`. weightUnit travels with weight: if there's no
-  /// weight, the unit is meaningless and is omitted too.
-  Map<String, dynamic> toCreateJson() {
-    final out = <String, dynamic>{'entryDate': entryDate};
-    if (weight != null) {
-      out['weight'] = weight;
-      out['weightUnit'] = weightUnit;
-    }
+  /// Body for POST /api/journal — UPSERT by (userId, entryDate). The
+  /// backend treats this as a complete write-over: every writable field
+  /// in the payload replaces the stored value, and any field OMITTED
+  /// from the payload is written as null. So the contract requires the
+  /// client to always send the full form state.
+  ///
+  /// We emit explicit `null` for absent values (rather than omitting)
+  /// so the intent is unambiguous on the wire. weightUnit travels with
+  /// weight: if weight is null, unit is null too — a unit without a
+  /// value is nonsense. measurements is sent as null when empty so the
+  /// server doesn't store `{}`.
+  ///
+  /// Read-only fields (journalEntryId, photoSignedUrl, createdAt,
+  /// updatedAt) are never sent. Photo state is mutated via a separate
+  /// PUT/DELETE on /api/journal/{id}/photo.
+  Map<String, dynamic> toUpsertJson() {
+    final hasWeight = weight != null;
     final m = measurements;
-    if (m != null && m.isNotEmpty) out['measurements'] = m;
-    final t = thoughts;
-    if (t != null && t.isNotEmpty) out['thoughts'] = t;
-    final pr = promptResponses;
-    if (pr != null && pr.isNotEmpty) out['promptResponses'] = pr;
-    final s = summary;
-    if (s != null && s.isNotEmpty) out['summary'] = s;
-    final mo = mood;
-    if (mo != null && mo.isNotEmpty) out['mood'] = mo;
-    return out;
+    return {
+      'entryDate': entryDate,
+      'weight': hasWeight ? weight : null,
+      'weightUnit': hasWeight ? weightUnit : null,
+      'measurements': (m != null && m.isNotEmpty) ? m : null,
+      'thoughts': thoughts,
+      'promptResponses': promptResponses,
+      'summary': summary,
+      'mood': mood,
+    };
   }
 }
 
