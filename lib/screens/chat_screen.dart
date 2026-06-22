@@ -21,6 +21,7 @@ import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
+import '../widgets/blooms/journal_entry.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
 
@@ -424,6 +425,14 @@ class _ChatScreenState extends State<ChatScreen> {
     return '$error';
   }
 
+  // Called by the Journal bloom after a successful save. Mirrors the
+  // "reflect it back" spirit of _regiSay — adds an assistant message and,
+  // if TTS is on, speaks it. The bloom passes a pre-formatted confirmation
+  // like "Journaled for Jun 22 — 396 lb".
+  void _onJournalSaved(String confirmation) {
+    _regiSay(confirmation);
+  }
+
   // Display + speak a Regi utterance. Mirrors the TTS code path in
   // _doSendMessage (same _pinnedVoiceId + state.ttsRate, same fresh-JWT
   // fetch, same TtsException handling) so command responses sound
@@ -719,6 +728,17 @@ class _ChatScreenState extends State<ChatScreen> {
                   context.read<ChatState>().openBloom('AddFood');
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.book, color: Colors.white),
+                title: const Text(
+                  'Journal...',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  context.read<ChatState>().openBloom('Journal');
+                },
+              ),
             ],
           ),
         ),
@@ -818,14 +838,19 @@ class _ChatScreenState extends State<ChatScreen> {
                                       ),
                                     ),
                                   )
-                                : Center(
-                                    child: Text(
-                                      'BLOOM: ${state.activeBloom}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
+                                : state.activeBloom == 'Journal'
+                                    ? JournalEntry(
+                                        speech: _speech,
+                                        onSaved: _onJournalSaved,
+                                      )
+                                    : Center(
+                                        child: Text(
+                                          'BLOOM: ${state.activeBloom}',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                          ),
+                                        ),
                                       ),
-                                    ),
-                                  ),
                       ),
                     ),
                     // macOS-style close: tiny red circle sitting on the top-
