@@ -11,15 +11,17 @@ import '../../services/journal_service.dart';
 import '../../services/voice_sink.dart';
 import '../../state/chat_state.dart';
 
-/// Bloom content: create a journal entry (date, optional photo, thoughts,
-/// weight, optional measurements). Submits via [JournalService]; photo
-/// uploads as a separate multipart PUT after the entry id exists.
+/// Left-nav overlay: create a journal entry (date, optional photo,
+/// thoughts, weight, optional measurements). Replaces the chat output
+/// area while open. Submits via [JournalService]; photo uploads as a
+/// separate multipart PUT after the entry id exists.
 ///
 /// Voice is routed via the global [VoiceSink] — there is NO inline mic
-/// here. On mount the bloom calls [ChatState.enterVoiceCapture] (forces
-/// input mode to voice so the floating PTT shows) and registers a sink
-/// that appends each batch-transcribed burst into the Thoughts field.
-/// On unmount both are reversed.
+/// here. On mount the overlay registers a sink; ChatScreen's PTT
+/// visibility derives from `voiceSink != null`, so the talk button comes
+/// alive automatically when this overlay opens (regardless of the
+/// slider's text/voice setting). On dispose the sink is cleared and PTT
+/// reverts to the slider preference.
 ///
 /// Voice transport is BATCH — ChatScreen records during the hold and
 /// POSTs the WAV blob on release, so the sink's [VoiceSink.onPartial]
@@ -83,7 +85,6 @@ class _JournalEntryState extends State<JournalEntry> {
     _thoughts.addListener(_rebuildForSaveEnable);
     _weight.addListener(_rebuildForSaveEnable);
     final cs = context.read<ChatState>();
-    cs.enterVoiceCapture();
     cs.setVoiceSink(VoiceSink(
       label: 'Journal',
       onStart: () => _thoughtsPrefix = _thoughts.text,
@@ -103,13 +104,11 @@ class _JournalEntryState extends State<JournalEntry> {
 
   @override
   void dispose() {
-    // Unregister BEFORE super.dispose so any in-flight PTT release
-    // routes back to the chat default. enterVoiceCapture has a matching
-    // exit to restore the pre-bloom input mode (text vs voice).
+    // Clear the voice sink so any in-flight PTT release routes back to
+    // the chat default and the PTT button hides (unless the user has
+    // explicitly chosen Voice in the slider).
     try {
-      final cs = context.read<ChatState>();
-      cs.setVoiceSink(null);
-      cs.exitVoiceCapture();
+      context.read<ChatState>().setVoiceSink(null);
     } catch (_) {
       // context may already be unmounted in pathological teardown paths.
     }
@@ -228,7 +227,7 @@ class _JournalEntryState extends State<JournalEntry> {
       }
       if (!mounted) return;
       widget.onSaved?.call(_confirmationFor(saved));
-      context.read<ChatState>().closeBloom();
+      context.read<ChatState>().closeOverlay();
     } on JournalException catch (e) {
       if (!mounted) return;
       setState(() {

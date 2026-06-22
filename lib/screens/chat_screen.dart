@@ -22,8 +22,8 @@ import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
-import '../widgets/blooms/journal_entry.dart';
 import '../widgets/blooms/user_settings.dart';
+import '../widgets/overlays/journal_entry.dart';
 import '../widgets/ptt_button.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
@@ -714,15 +714,39 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final sink = state.voiceSink;
     if (sink != null) {
-      // Sink path (e.g. Journal bloom): commit the final transcript to
-      // the bloom's field AND append a running-log user message so the
-      // chat behind the bloom shows each captured burst. We do NOT call
-      // _sendMessage — the sink owns whatever happens next.
+      // Sink path (e.g. Journal overlay): commit the final transcript to
+      // the overlay's field. We do NOT also addMessage — overlays own
+      // their own display surface; duplicating the line into chat-output
+      // is noise (and chat-output is often hidden behind the overlay).
       sink.onFinal(text);
-      state.addMessage(TextMessage(content: text, role: MessageRole.user));
     } else {
       state.clearCurrentInput();
       await _sendMessage(text);
+    }
+  }
+
+  // Renders the active left-nav overlay into the chat-output slot. See
+  // CLAUDE.md for the overlay vs bloom split — overlays replace the
+  // entire conversation area; blooms (rendered elsewhere) partially
+  // occlude whatever is behind them.
+  Widget _renderOverlay(String key) {
+    switch (key) {
+      case 'Journal':
+        return JournalEntry(onSaved: _onJournalSaved);
+      case 'AddFood':
+        return const Center(
+          child: Text(
+            'Add Food Placeholder',
+            style: TextStyle(color: Colors.white, fontSize: 18),
+          ),
+        );
+      default:
+        return Center(
+          child: Text(
+            'OVERLAY: $key',
+            style: const TextStyle(color: Colors.white),
+          ),
+        );
     }
   }
 
@@ -739,7 +763,12 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
-    final showPtt = state.mode == InputMode.voice;
+    // PTT comes alive when EITHER an overlay/bloom has registered a
+    // voice sink (e.g. Journal needs dictation regardless of the user's
+    // slider preference), OR the user explicitly chose Voice in the
+    // mode slider for plain chat. See CLAUDE.md.
+    final showPtt =
+        state.voiceSink != null || state.mode == InputMode.voice;
     final screenSize = MediaQuery.of(context).size;
     final pttPos = _clampPttPosition(
       _pttPosition ?? _defaultPttPosition(screenSize),
@@ -767,23 +796,23 @@ class _ChatScreenState extends State<ChatScreen> {
               ListTile(
                 leading: const Icon(Icons.add, color: Colors.white),
                 title: const Text(
-                  'Add Food...',
+                  'Add Food',
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  context.read<ChatState>().openBloom('AddFood');
+                  context.read<ChatState>().openOverlay('AddFood');
                 },
               ),
               ListTile(
                 leading: const Icon(Icons.book, color: Colors.white),
                 title: const Text(
-                  'Journal...',
+                  'Enter Journal',
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  context.read<ChatState>().openBloom('Journal');
+                  context.read<ChatState>().openOverlay('Journal');
                 },
               ),
             ],
@@ -821,6 +850,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
+          if (state.activeOverlay != null)
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: 'Close ${state.activeOverlay}',
+              onPressed: () => context.read<ChatState>().closeOverlay(),
+            ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'Settings',
@@ -843,7 +878,11 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Column(
             children: [
-              const Expanded(child: ChatOutput()),
+              Expanded(
+                child: state.activeOverlay != null
+                    ? _renderOverlay(state.activeOverlay!)
+                    : const ChatOutput(),
+              ),
               ChatInput(
                 onSend: _sendMessage,
                 onTalkStart: _handleTalkStart,
@@ -875,28 +914,14 @@ class _ChatScreenState extends State<ChatScreen> {
                             ? UserSettings(
                                 key: ValueKey(_userSettingsRev),
                               )
-                            : state.activeBloom == 'AddFood'
-                                ? const Center(
-                                    child: Text(
-                                      'Add Food Placeholder',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 18,
-                                      ),
-                                    ),
-                                  )
-                                : state.activeBloom == 'Journal'
-                                    ? JournalEntry(
-                                        onSaved: _onJournalSaved,
-                                      )
-                                    : Center(
-                                        child: Text(
-                                          'BLOOM: ${state.activeBloom}',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                      ),
+                            : Center(
+                                child: Text(
+                                  'BLOOM: ${state.activeBloom}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
                       ),
                     ),
                     // macOS-style close: tiny red circle sitting on the top-

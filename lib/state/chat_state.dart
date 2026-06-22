@@ -15,11 +15,11 @@ class ChatState extends ChangeNotifier {
   bool _ttsEnabled = true;
   double _ttsRate = 1.25;
   String? _activeBloom;
+  // Left-nav full-area destination (Add Food, Enter Journal). Independent
+  // of [_activeBloom] — a bloom can appear ON TOP of an overlay; both
+  // close independently. See CLAUDE.md for the overlay vs bloom split.
+  String? _activeOverlay;
   VoiceSink? _voiceSink;
-  // Captured by enterVoiceCapture so exit restores whatever mode the
-  // user was in before the bloom force-switched to voice. Null when no
-  // voice-capture session is active.
-  InputMode? _modeBeforeCapture;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -31,35 +31,18 @@ class ChatState extends ChangeNotifier {
   bool get ttsEnabled => _ttsEnabled;
   double get ttsRate => _ttsRate;
   String? get activeBloom => _activeBloom;
+  String? get activeOverlay => _activeOverlay;
   VoiceSink? get voiceSink => _voiceSink;
 
   /// Registers (or clears) the routing target for the global PTT mic.
   /// While non-null, ChatScreen pipes transcripts through the sink
-  /// instead of into the chat input. Clearing restores chat default.
-  /// Does not notify — the sink is plumbing, not displayed state.
+  /// instead of into the chat input AND the PTT button is visible
+  /// regardless of [mode]. Notifies because PTT visibility is now
+  /// derived from sink presence.
   void setVoiceSink(VoiceSink? s) {
+    if (identical(_voiceSink, s)) return;
     _voiceSink = s;
-  }
-
-  /// Force input mode to voice for the duration of a capture session
-  /// (e.g. while a dictation-using bloom is open), snapshotting the
-  /// prior mode so [exitVoiceCapture] can restore it.
-  void enterVoiceCapture() {
-    _modeBeforeCapture = _mode;
-    if (_mode != InputMode.voice) {
-      _mode = InputMode.voice;
-    }
     notifyListeners();
-  }
-
-  /// Restores the mode that was active before [enterVoiceCapture]. No-op
-  /// if no capture session is in flight.
-  void exitVoiceCapture() {
-    if (_modeBeforeCapture != null) {
-      _mode = _modeBeforeCapture!;
-      _modeBeforeCapture = null;
-      notifyListeners();
-    }
   }
 
   void setMode(InputMode mode) {
@@ -97,6 +80,21 @@ class ChatState extends ChangeNotifier {
   void closeBloom() {
     if (_activeBloom == null) return;
     _activeBloom = null;
+    notifyListeners();
+  }
+
+  /// Opens a left-nav full-area overlay (Add Food, Enter Journal).
+  /// Replaces the chat output area while active. Independent from any
+  /// bloom that may be on top.
+  void openOverlay(String key) {
+    if (_activeOverlay == key) return;
+    _activeOverlay = key;
+    notifyListeners();
+  }
+
+  void closeOverlay() {
+    if (_activeOverlay == null) return;
+    _activeOverlay = null;
     notifyListeners();
   }
 
