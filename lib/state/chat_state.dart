@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
+import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
@@ -14,6 +15,11 @@ class ChatState extends ChangeNotifier {
   bool _ttsEnabled = true;
   double _ttsRate = 1.25;
   String? _activeBloom;
+  VoiceSink? _voiceSink;
+  // Captured by enterVoiceCapture so exit restores whatever mode the
+  // user was in before the bloom force-switched to voice. Null when no
+  // voice-capture session is active.
+  InputMode? _modeBeforeCapture;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -25,6 +31,36 @@ class ChatState extends ChangeNotifier {
   bool get ttsEnabled => _ttsEnabled;
   double get ttsRate => _ttsRate;
   String? get activeBloom => _activeBloom;
+  VoiceSink? get voiceSink => _voiceSink;
+
+  /// Registers (or clears) the routing target for the global PTT mic.
+  /// While non-null, ChatScreen pipes transcripts through the sink
+  /// instead of into the chat input. Clearing restores chat default.
+  /// Does not notify — the sink is plumbing, not displayed state.
+  void setVoiceSink(VoiceSink? s) {
+    _voiceSink = s;
+  }
+
+  /// Force input mode to voice for the duration of a capture session
+  /// (e.g. while a dictation-using bloom is open), snapshotting the
+  /// prior mode so [exitVoiceCapture] can restore it.
+  void enterVoiceCapture() {
+    _modeBeforeCapture = _mode;
+    if (_mode != InputMode.voice) {
+      _mode = InputMode.voice;
+    }
+    notifyListeners();
+  }
+
+  /// Restores the mode that was active before [enterVoiceCapture]. No-op
+  /// if no capture session is in flight.
+  void exitVoiceCapture() {
+    if (_modeBeforeCapture != null) {
+      _mode = _modeBeforeCapture!;
+      _modeBeforeCapture = null;
+      notifyListeners();
+    }
+  }
 
   void setMode(InputMode mode) {
     if (_mode == mode) return;

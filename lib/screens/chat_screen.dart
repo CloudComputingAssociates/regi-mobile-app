@@ -74,6 +74,10 @@ class _ChatScreenState extends State<ChatScreen> {
   final MicLevelService _micLevels = MicLevelService();
   StreamSubscription<String>? _speechSub;
   StreamSubscription<String>? _speechStatusSub;
+  // Last cumulative transcript captured during the current PTT hold. We
+  // can't rely on state.currentInput when a VoiceSink is registered (it
+  // bypasses the chat input), so we track it locally too.
+  String _lastVoiceText = '';
   // In-flight guard. Defends against any path that double-invokes
   // _sendMessage (rapid double-tap, Flutter Web onSubmitted bugs, etc.).
   bool _sending = false;
@@ -642,7 +646,14 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _handleTalkStart() async {
     final state = context.read<ChatState>();
     state.setTalkActive(true);
-    state.setCurrentInput('');
+    _lastVoiceText = '';
+
+    final sink = state.voiceSink;
+    if (sink != null) {
+      sink.onStart();
+    } else {
+      state.setCurrentInput('');
+    }
 
     final ok = await _speech.initialize();
     if (!ok) return;
@@ -650,7 +661,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _speechSub?.cancel();
     _speechSub = _speech.listen().listen((transcript) {
       if (!mounted) return;
-      context.read<ChatState>().setCurrentInput(transcript);
+      _lastVoiceText = transcript;
+      final s = context.read<ChatState>().voiceSink;
+      if (s != null) {
+        s.onPartial(transcript);
+      } else {
+        context.read<ChatState>().setCurrentInput(transcript);
+      }
     });
 
     // NOTE: parallel MicLevelService.start() (getUserMedia + AnalyserNode)
@@ -670,12 +687,26 @@ class _ChatScreenState extends State<ChatScreen> {
     await _speechSub?.cancel();
     _speechSub = null;
 
-    final transcript = state.currentInput.trim();
+    final text = _lastVoiceText.trim();
+    _lastVoiceText = '';
     state.setTalkActive(false);
-    state.clearCurrentInput();
 
-    if (transcript.isNotEmpty) {
-      await _sendMessage(transcript);
+    final sink = state.voiceSink;
+    if (sink != null) {
+      // Sink path (e.g. Journal bloom): commit the final transcript to
+      // the bloom's field AND append a running-log user message so the
+      // chat behind the bloom shows each captured burst. We do NOT call
+      // _sendMessage — the sink owns whatever happens next.
+      if (text.isNotEmpty) {
+        sink.onFinal(text);
+        state.addMessage(TextMessage(content: text, role: MessageRole.user));
+      }
+    } else {
+      // Chat path: clear the input echo, then send as a real turn.
+      state.clearCurrentInput();
+      if (text.isNotEmpty) {
+        await _sendMessage(text);
+      }
     }
   }
 
@@ -840,7 +871,6 @@ class _ChatScreenState extends State<ChatScreen> {
                                   )
                                 : state.activeBloom == 'Journal'
                                     ? JournalEntry(
-                                        speech: _speech,
                                         onSaved: _onJournalSaved,
                                       )
                                     : Center(

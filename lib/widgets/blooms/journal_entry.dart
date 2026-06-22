@@ -8,24 +8,23 @@ import 'package:provider/provider.dart';
 import '../../models/journal_entry.dart' as model;
 import '../../services/auth_service.dart';
 import '../../services/journal_service.dart';
-import '../../services/speech_service.dart';
+import '../../services/voice_sink.dart';
 import '../../state/chat_state.dart';
 
 /// Bloom content: create a journal entry (date, optional photo, thoughts,
 /// weight, optional measurements). Submits via [JournalService]; photo
 /// uploads as a separate multipart PUT after the entry id exists.
 ///
-/// Speech is INJECTED — the recognizer is owned by ChatScreen so the
-/// platform mic isn't double-initialized. dispose() cancels our
-/// subscription but never disposes [widget.speech].
+/// Voice is routed via the global [VoiceSink] — there is NO inline mic
+/// here. On mount the bloom calls [ChatState.enterVoiceCapture] (forces
+/// input mode to voice so the floating PTT shows) and registers a sink
+/// that pipes live transcripts into the Thoughts field. On unmount both
+/// are reversed.
 class JournalEntry extends StatefulWidget {
   const JournalEntry({
     super.key,
-    required this.speech,
     this.onSaved,
   });
-
-  final SpeechService speech;
 
   /// Fired after a successful save with a short confirmation line (e.g.
   /// "Journaled for Jun 22 — 396 lb") that the parent reflects back as
@@ -63,30 +62,44 @@ class _JournalEntryState extends State<JournalEntry> {
   String _weightUnit = 'lb';
   XFile? _photo;
   Uint8List? _photoBytes;
-  bool _isListening = false;
   bool _isSaving = false;
   String? _saveError;
 
-  // Snapshot of _thoughts.text at mic-press, so live transcript appends
-  // to existing typing instead of clobbering it.
+  // Snapshot of _thoughts.text taken at mic-press (sink.onStart) and
+  // refreshed on each release (sink.onFinal). Live transcripts compose
+  // with this prefix so dictation appends to anything the user already
+  // typed, and successive bursts append to each other.
   String _thoughtsPrefix = '';
-  StreamSubscription<String>? _speechSub;
 
   @override
   void initState() {
     super.initState();
     _thoughts.addListener(_rebuildForSaveEnable);
     _weight.addListener(_rebuildForSaveEnable);
+    final cs = context.read<ChatState>();
+    cs.enterVoiceCapture();
+    cs.setVoiceSink(VoiceSink(
+      label: 'Journal',
+      onStart: () => _thoughtsPrefix = _thoughts.text,
+      onPartial: (c) => _setThoughtsText(
+        _thoughtsPrefix.isEmpty ? c : '$_thoughtsPrefix $c',
+      ),
+      onFinal: (_) => _thoughtsPrefix = _thoughts.text,
+    ));
   }
 
   @override
   void dispose() {
-    // If still listening, stop the recognizer so the OS mic releases. We
-    // do NOT dispose widget.speech — it belongs to ChatScreen.
-    if (_isListening) {
-      unawaited(widget.speech.stop());
+    // Unregister BEFORE super.dispose so any in-flight PTT release
+    // routes back to the chat default. enterVoiceCapture has a matching
+    // exit to restore the pre-bloom input mode (text vs voice).
+    try {
+      final cs = context.read<ChatState>();
+      cs.setVoiceSink(null);
+      cs.exitVoiceCapture();
+    } catch (_) {
+      // context may already be unmounted in pathological teardown paths.
     }
-    _speechSub?.cancel();
     _thoughts.dispose();
     _weight.dispose();
     for (final c in _measurements.values) {
@@ -105,32 +118,6 @@ class _JournalEntryState extends State<JournalEntry> {
       _thoughts.text.trim().isNotEmpty ||
       _weight.text.trim().isNotEmpty ||
       _photo != null;
-
-  // ───────── Mic (press-and-hold) ─────────
-
-  Future<void> _onMicDown() async {
-    if (_isListening) return;
-    final ok = await widget.speech.initialize();
-    if (!ok || !mounted) return;
-    _thoughtsPrefix = _thoughts.text;
-    setState(() => _isListening = true);
-    _speechSub?.cancel();
-    _speechSub = widget.speech.listen().listen((transcript) {
-      if (!mounted) return;
-      _setThoughtsText(_thoughtsPrefix.isEmpty
-          ? transcript
-          : '$_thoughtsPrefix $transcript');
-    });
-  }
-
-  Future<void> _onMicUp() async {
-    if (!_isListening) return;
-    await widget.speech.stop();
-    await _speechSub?.cancel();
-    _speechSub = null;
-    if (!mounted) return;
-    setState(() => _isListening = false);
-  }
 
   void _setThoughtsText(String value) {
     if (_thoughts.text == value) return;
@@ -418,18 +405,7 @@ class _JournalEntryState extends State<JournalEntry> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            _sectionTitle('Thoughts'),
-            const Spacer(),
-            _MicButton(
-              active: _isListening,
-              onPressStart: _onMicDown,
-              onPressEnd: _onMicUp,
-            ),
-          ],
-        ),
-        const SizedBox(height: 4),
+        _sectionTitle('Thoughts'),
         TextField(
           controller: _thoughts,
           minLines: 3,
@@ -438,7 +414,7 @@ class _JournalEntryState extends State<JournalEntry> {
           decoration: InputDecoration(
             filled: true,
             fillColor: _inputFill,
-            hintText: 'How did today feel? Hold the mic to dictate.',
+            hintText: 'How did today feel? Hold the talk button to dictate.',
             hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
             contentPadding: const EdgeInsets.symmetric(
               horizontal: 12,
@@ -660,35 +636,3 @@ class _JournalEntryState extends State<JournalEntry> {
   }
 }
 
-class _MicButton extends StatelessWidget {
-  const _MicButton({
-    required this.active,
-    required this.onPressStart,
-    required this.onPressEnd,
-  });
-
-  final bool active;
-  final VoidCallback onPressStart;
-  final VoidCallback onPressEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    return Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: (_) => onPressStart(),
-      onPointerUp: (_) => onPressEnd(),
-      onPointerCancel: (_) => onPressEnd(),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: active ? const Color(0xFFF2B33D) : const Color(0xFF2196F3),
-          shape: BoxShape.circle,
-        ),
-        alignment: Alignment.center,
-        child: const Icon(Icons.mic, color: Colors.white, size: 18),
-      ),
-    );
-  }
-}
