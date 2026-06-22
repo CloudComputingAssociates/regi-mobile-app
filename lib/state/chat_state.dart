@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
+import '../services/overlay_actions.dart';
 import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
@@ -20,6 +21,10 @@ class ChatState extends ChangeNotifier {
   // close independently. See CLAUDE.md for the overlay vs bloom split.
   String? _activeOverlay;
   VoiceSink? _voiceSink;
+  // Optional save bridge for the active overlay. Registered by overlays
+  // that want a Save affordance in the AppBar (e.g. Journal). Null when
+  // no overlay is open or the overlay doesn't have a save flow.
+  OverlayActions? _overlayActions;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -33,6 +38,16 @@ class ChatState extends ChangeNotifier {
   String? get activeBloom => _activeBloom;
   String? get activeOverlay => _activeOverlay;
   VoiceSink? get voiceSink => _voiceSink;
+  OverlayActions? get overlayActions => _overlayActions;
+
+  /// Registers (or clears) the AppBar Save bridge for the active
+  /// overlay. Notifies because AppBar visibility/enable derives from
+  /// presence and canSave.
+  void setOverlayActions(OverlayActions? a) {
+    if (identical(_overlayActions, a)) return;
+    _overlayActions = a;
+    notifyListeners();
+  }
 
   /// Registers (or clears) the routing target for the global PTT mic.
   /// While non-null, ChatScreen pipes transcripts through the sink

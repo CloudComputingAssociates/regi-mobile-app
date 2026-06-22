@@ -91,6 +91,11 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _pttButtonSize = 90.0;
   static const _pttDragInactivityTimeout = Duration(seconds: 5);
   static const _pttDefaultBottomInset = 210.0;
+  // Approximate height of the chat-input row (two rows of buttons +
+  // text field + padding). PTT is clamped so it cannot be positioned
+  // over this zone, otherwise its 90px disc covers the mute / mode /
+  // talk controls and steals their taps. Slightly generous to be safe.
+  static const _chatInputApproxHeight = 160.0;
 
   Offset? _pttPosition;
   bool _pttDragMode = false;
@@ -151,7 +156,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Offset _clampPttPosition(Offset pos, Size screen) {
     final maxX = (screen.width - _pttButtonSize).clamp(0.0, double.infinity);
-    final maxY = (screen.height - _pttButtonSize).clamp(0.0, double.infinity);
+    // Reserve the bottom strip for the chat-input row — PTT cannot be
+    // dragged or default-positioned over it, so the mute / mode / talk
+    // controls stay clickable.
+    final maxY = (screen.height - _chatInputApproxHeight - _pttButtonSize)
+        .clamp(0.0, double.infinity);
     return Offset(
       pos.dx.clamp(0.0, maxX),
       pos.dy.clamp(0.0, maxY),
@@ -749,6 +758,21 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  // Friendly label for the AppBar title while an overlay is active.
+  // Branding is suppressed in favor of "(overlay name)" so the mobile
+  // header has room for the overlay's actions (Save / Close) without
+  // wrapping or truncation.
+  String _overlayDisplayName(String key) {
+    switch (key) {
+      case 'Journal':
+        return '(Journal)';
+      case 'AddFood':
+        return '(Add Food)';
+      default:
+        return '($key)';
+    }
+  }
+
   // Renders the active left-nav overlay into the chat-output slot. See
   // CLAUDE.md for the overlay vs bloom split — overlays replace the
   // entire conversation area; blooms (rendered elsewhere) partially
@@ -846,37 +870,61 @@ class _ChatScreenState extends State<ChatScreen> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
-        title: Row(
-          children: [
-            const Text('RegiMenu'),
-            const SizedBox(width: 12),
-            // Mic icon goes amber ONLY when the recognizer is actually
-            // listening (not just when the button was pressed). The
-            // ~100-200ms delay between press and amber is the user's cue
-            // that the recognizer is now ready and they can start talking.
-            Icon(
-              Icons.mic,
-              size: 18,
-              color: state.isListening
-                  ? const Color(0xFFF2B33D)
-                  : Colors.white24,
-            ),
-            const SizedBox(width: 8),
-            if (state.isListening)
-              const MicLevelBars(
-                barCount: 11,
-                color: Color(0xFFF2B33D),
-                minHeight: 4,
-                maxHeight: 26,
-                barWidth: 2,
-                spacing: 2,
+        // Title shrinks to the overlay's name while an overlay is open —
+        // on mobile we don't have horizontal room for branding + a long
+        // overlay name + the AppBar actions. Branding returns once the
+        // overlay closes.
+        title: state.activeOverlay != null
+            ? Text(_overlayDisplayName(state.activeOverlay!))
+            : Row(
+                children: [
+                  const Text('RegiMenu'),
+                  const SizedBox(width: 12),
+                  // Mic icon goes amber ONLY when the recognizer is
+                  // actually listening. The ~100-200ms delay between
+                  // press and amber is the user's cue that the recognizer
+                  // is ready and they can start talking.
+                  Icon(
+                    Icons.mic,
+                    size: 18,
+                    color: state.isListening
+                        ? const Color(0xFFF2B33D)
+                        : Colors.white24,
+                  ),
+                  const SizedBox(width: 8),
+                  if (state.isListening)
+                    const MicLevelBars(
+                      barCount: 11,
+                      color: Color(0xFFF2B33D),
+                      minHeight: 4,
+                      maxHeight: 26,
+                      barWidth: 2,
+                      spacing: 2,
+                    ),
+                ],
               ),
-          ],
-        ),
         actions: [
+          // Overlay-scoped actions appear first so they sit at the
+          // right-edge of the bar (green save + red close, mac-style).
+          if (state.overlayActions != null)
+            IconButton(
+              icon: Icon(
+                Icons.check_circle,
+                color: state.overlayActions!.canSave
+                    ? const Color(0xFF4CAF50)
+                    : Colors.white24,
+              ),
+              tooltip: 'Save',
+              onPressed: state.overlayActions!.canSave
+                  ? state.overlayActions!.onSave
+                  : null,
+            ),
           if (state.activeOverlay != null)
             IconButton(
-              icon: const Icon(Icons.close),
+              icon: const Icon(
+                Icons.cancel,
+                color: Color(0xFFFF5F57),
+              ),
               tooltip: 'Close ${state.activeOverlay}',
               onPressed: () => context.read<ChatState>().closeOverlay(),
             ),

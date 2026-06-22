@@ -8,6 +8,7 @@ import 'package:provider/provider.dart';
 import '../../models/journal_entry.dart' as model;
 import '../../services/auth_service.dart';
 import '../../services/journal_service.dart';
+import '../../services/overlay_actions.dart';
 import '../../services/voice_sink.dart';
 import '../../state/chat_state.dart';
 
@@ -45,7 +46,6 @@ class JournalEntry extends StatefulWidget {
 
 class _JournalEntryState extends State<JournalEntry> {
   // Visual tokens — mirror UserSettings.
-  static const Color _accent = Color(0xFFF2B33D);
   static const Color _inputFill = Color(0xFF555555);
 
   final JournalService _service = JournalService();
@@ -77,7 +77,15 @@ class _JournalEntryState extends State<JournalEntry> {
   String? _existingPhotoUrl;
   bool _isSaving = false;
   bool _isLoading = true;
-  String? _saveError;
+  // Becomes true on the first user mutation after the prefill settles.
+  // Save is gated on this so a freshly-opened (pre-filled-from-server)
+  // form doesn't offer Save until the user has actually changed
+  // something — the user explicitly asked for this.
+  bool _isDirty = false;
+  // True while _prefillFrom is writing into controllers, so the
+  // controller listeners that fire don't get counted as "user mutated
+  // the form."
+  bool _isPrefilling = false;
 
   // Snapshot of _thoughts.text taken at mic-press (sink.onStart). The
   // batch-transcribed final text is appended to this prefix in onFinal so
@@ -88,8 +96,11 @@ class _JournalEntryState extends State<JournalEntry> {
   @override
   void initState() {
     super.initState();
-    _thoughts.addListener(_rebuildForSaveEnable);
-    _weight.addListener(_rebuildForSaveEnable);
+    _thoughts.addListener(_onFormMutated);
+    _weight.addListener(_onFormMutated);
+    for (final c in _measurements.values) {
+      c.addListener(_onFormMutated);
+    }
     final cs = context.read<ChatState>();
     cs.setVoiceSink(VoiceSink(
       label: 'Journal',
@@ -105,9 +116,43 @@ class _JournalEntryState extends State<JournalEntry> {
             : '$_thoughtsPrefix${_separatorAfter(_thoughtsPrefix)}$text';
         _setThoughtsText(combined);
         _thoughtsPrefix = combined;
+        // Voice dictation IS a user mutation.
+        _markDirty();
       },
     ));
+    _publishActions();
     unawaited(_loadTodayEntry());
+  }
+
+  /// Called from every form-field listener AND every non-listener
+  /// mutation (date pick, unit toggle, photo pick/clear, thoughts trash).
+  /// Suppresses dirty during prefill so a server-populated form doesn't
+  /// arrive already-dirty. After the first real mutation, republishes
+  /// OverlayActions so the AppBar Save icon enables.
+  void _onFormMutated() {
+    if (!mounted || _isPrefilling) return;
+    _markDirty();
+    setState(() {});
+  }
+
+  void _markDirty() {
+    if (_isPrefilling || _isDirty) {
+      // Either we're prefilling (don't count) or we're already dirty
+      // (state hasn't changed). Either way, no republish needed.
+      return;
+    }
+    _isDirty = true;
+    _publishActions();
+  }
+
+  /// Registers the current Save bridge with ChatState. Called whenever
+  /// canSave could have changed (dirty flip, save start/end, dispose).
+  void _publishActions() {
+    if (!mounted) return;
+    context.read<ChatState>().setOverlayActions(OverlayActions(
+      onSave: () => unawaited(_save()),
+      canSave: _isDirty && !_isSaving,
+    ));
   }
 
   /// Cross-device coherence: GETs today's entry on mount so a user who
@@ -133,32 +178,42 @@ class _JournalEntryState extends State<JournalEntry> {
   }
 
   void _prefillFrom(model.JournalEntry e) {
-    _existingPhotoUrl = e.photoSignedUrl;
-    // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse the
-    // date portion only. Falls back to today on any parse problem.
-    final parsed = DateTime.tryParse(e.entryDate);
-    if (parsed != null) _entryDate = DateTime(parsed.year, parsed.month, parsed.day);
-    if (e.weight != null) {
-      final w = e.weight!;
-      _weight.text = w == w.roundToDouble()
-          ? w.toInt().toString()
-          : w.toStringAsFixed(1);
-    }
-    _weightUnit = e.weightUnit;
-    if (e.thoughts != null) _thoughts.text = e.thoughts!;
-    final m = e.measurements;
-    if (m != null) {
-      m.forEach((key, value) {
-        final c = _measurements[key];
-        if (c == null) return;
-        if (value is num) {
-          c.text = value == value.roundToDouble()
-              ? value.toInt().toString()
-              : value.toStringAsFixed(1);
-        } else if (value is String) {
-          c.text = value;
-        }
-      });
+    // Set the prefill flag BEFORE touching any controller so the
+    // listener-triggered _onFormMutated calls bail out early and don't
+    // flip _isDirty. Cleared at the end.
+    _isPrefilling = true;
+    try {
+      _existingPhotoUrl = e.photoSignedUrl;
+      // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse
+      // the date portion only. Falls back to today on any parse problem.
+      final parsed = DateTime.tryParse(e.entryDate);
+      if (parsed != null) {
+        _entryDate = DateTime(parsed.year, parsed.month, parsed.day);
+      }
+      if (e.weight != null) {
+        final w = e.weight!;
+        _weight.text = w == w.roundToDouble()
+            ? w.toInt().toString()
+            : w.toStringAsFixed(1);
+      }
+      _weightUnit = e.weightUnit;
+      if (e.thoughts != null) _thoughts.text = e.thoughts!;
+      final m = e.measurements;
+      if (m != null) {
+        m.forEach((key, value) {
+          final c = _measurements[key];
+          if (c == null) return;
+          if (value is num) {
+            c.text = value == value.roundToDouble()
+                ? value.toInt().toString()
+                : value.toStringAsFixed(1);
+          } else if (value is String) {
+            c.text = value;
+          }
+        });
+      }
+    } finally {
+      _isPrefilling = false;
     }
   }
 
@@ -174,11 +229,14 @@ class _JournalEntryState extends State<JournalEntry> {
 
   @override
   void dispose() {
-    // Clear the voice sink so any in-flight PTT release routes back to
-    // the chat default and the PTT button hides (unless the user has
-    // explicitly chosen Voice in the slider).
+    // Clear voice sink + overlay actions so any in-flight PTT release
+    // routes back to the chat default, the PTT button hides (unless the
+    // user explicitly chose Voice in the slider), and the AppBar Save
+    // icon disappears.
     try {
-      context.read<ChatState>().setVoiceSink(null);
+      final cs = context.read<ChatState>();
+      cs.setVoiceSink(null);
+      cs.setOverlayActions(null);
     } catch (_) {
       // context may already be unmounted in pathological teardown paths.
     }
@@ -190,16 +248,6 @@ class _JournalEntryState extends State<JournalEntry> {
     _service.dispose();
     super.dispose();
   }
-
-  void _rebuildForSaveEnable() {
-    if (!mounted) return;
-    setState(() {});
-  }
-
-  bool get _canSave =>
-      _thoughts.text.trim().isNotEmpty ||
-      _weight.text.trim().isNotEmpty ||
-      _photo != null;
 
   void _setThoughtsText(String value) {
     if (_thoughts.text == value) return;
@@ -221,9 +269,10 @@ class _JournalEntryState extends State<JournalEntry> {
         _photo = xfile;
         _photoBytes = bytes;
       });
+      _markDirty();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _saveError = 'Photo picker error: $e');
+      _toast('Photo picker error: $e');
     }
   }
 
@@ -238,6 +287,7 @@ class _JournalEntryState extends State<JournalEntry> {
       _photoBytes = null;
       _existingPhotoUrl = null;
     });
+    _markDirty();
   }
 
   // ───────── Date ─────────
@@ -252,16 +302,17 @@ class _JournalEntryState extends State<JournalEntry> {
     );
     if (picked == null || !mounted) return;
     setState(() => _entryDate = picked);
+    _markDirty();
   }
 
   // ───────── Save ─────────
 
   Future<void> _save() async {
-    if (_isSaving || !_canSave) return;
+    if (_isSaving || !_isDirty) return;
     setState(() {
       _isSaving = true;
-      _saveError = null;
     });
+    _publishActions();
 
     final measurementsMap = <String, dynamic>{};
     _measurements.forEach((k, c) {
@@ -282,10 +333,9 @@ class _JournalEntryState extends State<JournalEntry> {
     final jwt = await context.read<AuthService>().getAccessToken();
     if (jwt == null) {
       if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _saveError = 'Not authenticated.';
-      });
+      setState(() => _isSaving = false);
+      _publishActions();
+      _toast('Not authenticated.');
       return;
     }
 
@@ -306,17 +356,29 @@ class _JournalEntryState extends State<JournalEntry> {
       context.read<ChatState>().closeOverlay();
     } on JournalException catch (e) {
       if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _saveError = 'Save failed: HTTP ${e.statusCode} ${e.body}';
-      });
+      setState(() => _isSaving = false);
+      _publishActions();
+      _toast('Save failed: HTTP ${e.statusCode} ${e.body}');
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _isSaving = false;
-        _saveError = 'Save failed: $e';
-      });
+      setState(() => _isSaving = false);
+      _publishActions();
+      _toast('Save failed: $e');
     }
+  }
+
+  /// Floats a short message above the overlay/chat-input. Used in place
+  /// of the inline `_saveError` slot we used to show below the Save
+  /// button, since Save now lives in the AppBar.
+  void _toast(String msg) {
+    if (!mounted) return;
+    final m = ScaffoldMessenger.of(context);
+    m.hideCurrentSnackBar();
+    m.showSnackBar(SnackBar(
+      content: Text(msg),
+      behavior: SnackBarBehavior.floating,
+      duration: const Duration(seconds: 4),
+    ));
   }
 
   String _confirmationFor(model.JournalEntry saved) {
@@ -375,15 +437,10 @@ class _JournalEntryState extends State<JournalEntry> {
           _measurementsExpander(),
           // TODO(glp1): when user setting 'Track GLP-1' ships, render a
           // dose field here.
-          const SizedBox(height: 22),
-          _saveButton(),
-          if (_saveError != null) ...[
-            const SizedBox(height: 10),
-            Text(
-              _saveError!,
-              style: const TextStyle(color: Colors.redAccent, fontSize: 12),
-            ),
-          ],
+          // Save lives in the AppBar (green check). Errors come back as
+          // SnackBars via [_toast] so a save failure can't get pushed
+          // off-screen by a scrolled form.
+          const SizedBox(height: 24),
         ],
       ),
     );
@@ -596,6 +653,7 @@ class _JournalEntryState extends State<JournalEntry> {
     }
     _setThoughtsText('');
     _thoughtsPrefix = '';
+    _markDirty();
   }
 
   Widget _weightSection() {
@@ -637,9 +695,10 @@ class _JournalEntryState extends State<JournalEntry> {
 
   Widget _unitToggle() {
     return InkWell(
-      onTap: () => setState(
-        () => _weightUnit = _weightUnit == 'lb' ? 'kg' : 'lb',
-      ),
+      onTap: () {
+        setState(() => _weightUnit = _weightUnit == 'lb' ? 'kg' : 'lb');
+        _markDirty();
+      },
       borderRadius: BorderRadius.circular(8),
       child: Container(
         width: 56,
@@ -721,39 +780,6 @@ class _JournalEntryState extends State<JournalEntry> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _saveButton() {
-    final enabled = _canSave && !_isSaving;
-    return SizedBox(
-      width: double.infinity,
-      child: ElevatedButton(
-        onPressed: enabled ? _save : null,
-        style: ElevatedButton.styleFrom(
-          backgroundColor: _accent,
-          foregroundColor: Colors.black,
-          disabledBackgroundColor: const Color(0xFF333333),
-          disabledForegroundColor: Colors.white38,
-          padding: const EdgeInsets.symmetric(vertical: 14),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
-        ),
-        child: _isSaving
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2,
-                  color: Colors.black,
-                ),
-              )
-            : const Text(
-                'Save',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
       ),
     );
   }
