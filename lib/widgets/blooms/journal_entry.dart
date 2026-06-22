@@ -18,8 +18,14 @@ import '../../state/chat_state.dart';
 /// Voice is routed via the global [VoiceSink] — there is NO inline mic
 /// here. On mount the bloom calls [ChatState.enterVoiceCapture] (forces
 /// input mode to voice so the floating PTT shows) and registers a sink
-/// that pipes live transcripts into the Thoughts field. On unmount both
-/// are reversed.
+/// that appends each batch-transcribed burst into the Thoughts field.
+/// On unmount both are reversed.
+///
+/// Voice transport is BATCH — ChatScreen records during the hold and
+/// POSTs the WAV blob on release, so the sink's [VoiceSink.onPartial]
+/// never fires here. [VoiceSink.onFinal] is the sole text-mutation
+/// point. The partial callback is retained for the contract (a future
+/// streaming consumer can wire it) but ChatScreen will not call it.
 class JournalEntry extends StatefulWidget {
   const JournalEntry({
     super.key,
@@ -65,10 +71,10 @@ class _JournalEntryState extends State<JournalEntry> {
   bool _isSaving = false;
   String? _saveError;
 
-  // Snapshot of _thoughts.text taken at mic-press (sink.onStart) and
-  // refreshed on each release (sink.onFinal). Live transcripts compose
-  // with this prefix so dictation appends to anything the user already
-  // typed, and successive bursts append to each other.
+  // Snapshot of _thoughts.text taken at mic-press (sink.onStart). The
+  // batch-transcribed final text is appended to this prefix in onFinal so
+  // dictation composes with existing typing and successive holds compose
+  // with each other.
   String _thoughtsPrefix = '';
 
   @override
@@ -81,10 +87,17 @@ class _JournalEntryState extends State<JournalEntry> {
     cs.setVoiceSink(VoiceSink(
       label: 'Journal',
       onStart: () => _thoughtsPrefix = _thoughts.text,
+      // Unused under batch transport — retained for the VoiceSink
+      // contract (a future streaming consumer could call it).
       onPartial: (c) => _setThoughtsText(
         _thoughtsPrefix.isEmpty ? c : '$_thoughtsPrefix $c',
       ),
-      onFinal: (_) => _thoughtsPrefix = _thoughts.text,
+      onFinal: (text) {
+        final combined =
+            _thoughtsPrefix.isEmpty ? text : '$_thoughtsPrefix $text';
+        _setThoughtsText(combined);
+        _thoughtsPrefix = combined;
+      },
     ));
   }
 

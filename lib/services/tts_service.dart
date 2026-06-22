@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 
 import '../config.dart';
 
-/// Wraps `POST {API_BASE_URL}/tts` on the regi-api backend.
+/// Wraps `POST {API_BASE_URL}/speech/tts` on the regi-api backend.
 ///
 /// Server contract (matches schemas/tts.schema.json in regi-api):
 ///   Request:  { text, voice?, languageCode?, speakingRate?, useSSML? }
@@ -47,7 +47,7 @@ class TtsService {
     http.Response res;
     try {
       res = await http.post(
-        Uri.parse('$_baseUrl/tts'),
+        Uri.parse('$_baseUrl/speech/tts'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $jwt',

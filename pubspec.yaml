@@ -14,7 +14,7 @@ dependencies:
   auth0_flutter: ^1.5.0
   http: ^1.2.0
   http_parser: ^4.0.0
-  speech_to_text: ^7.0.0
+  record: ^5.1.2
   flutter_secure_storage: ^9.2.0
   shared_preferences: ^2.3.0
   provider: ^6.1.0

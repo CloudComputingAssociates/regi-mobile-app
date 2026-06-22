@@ -8,13 +8,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
 import '../models/utterance_result.dart';
+import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
 import '../services/command_service.dart';
 import '../services/conversation_sink.dart';
 import '../services/mic_level_service.dart';
 import '../services/settings_service.dart';
-import '../services/speech_service.dart';
+import '../services/stt_service.dart';
 import '../services/tts_service.dart' show TtsService, TtsException;
 import '../state/chat_state.dart';
 import '../utils/units.dart';
@@ -44,7 +45,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
   final SettingsService _settings = SettingsService();
-  final SpeechService _speech = SpeechService();
+  final AudioRecorderService _recorder = AudioRecorderService();
+  final SttService _stt = SttService();
   final TtsService _tts = TtsService();
   // RAG seam — today a no-op. Every user/assistant turn flows through
   // recordTurn so that when the background-queue + Weaviate pipeline
@@ -72,12 +74,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // start() is not called. Kept wired (import + dispose) so re-enabling
   // is a one-line change once the recognizer/analyser conflict is solved.
   final MicLevelService _micLevels = MicLevelService();
-  StreamSubscription<String>? _speechSub;
-  StreamSubscription<String>? _speechStatusSub;
-  // Last cumulative transcript captured during the current PTT hold. We
-  // can't rely on state.currentInput when a VoiceSink is registered (it
-  // bypasses the chat input), so we track it locally too.
-  String _lastVoiceText = '';
   // In-flight guard. Defends against any path that double-invokes
   // _sendMessage (rapid double-tap, Flutter Web onSubmitted bugs, etc.).
   bool _sending = false;
@@ -110,24 +106,6 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _speech.initialize();
-    // Track recognizer's actual listening state so the AppBar mic icon
-    // lights amber only when the recognizer is genuinely capturing audio,
-    // not just when the user pressed the button. This is the "ready" cue
-    // for the beginning-word cut-off issue: users learn to wait for the
-    // amber glow before they start speaking. The platform recognizer emits
-    // 'listening' / 'notListening' / 'done'; map both terminal states to
-    // not-listening so the icon reverts promptly.
-    _speechStatusSub = _speech.statuses.listen((s) {
-      if (!mounted) return;
-      switch (s) {
-        case 'listening':
-          context.read<ChatState>().setListening(true);
-        case 'notListening':
-        case 'done':
-          context.read<ChatState>().setListening(false);
-      }
-    });
     _loadSkipClearPref();
     _loadPttPosition();
   }
@@ -152,11 +130,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    _speechSub?.cancel();
-    _speechStatusSub?.cancel();
     _pttDragTimer?.cancel();
-    _speech.stop();
-    _speech.dispose();
+    unawaited(_recorder.dispose());
+    _stt.dispose();
     _chat.dispose();
     _command.dispose();
     _settings.dispose();
@@ -643,53 +619,98 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // Voice capture is BATCH (record-then-transcribe), not streaming. On
+  // press we open the OS mic and buffer raw PCM via [AudioRecorderService];
+  // on release we ship the WAV blob to /api/speech/stt/transcribe and
+  // dispatch the returned transcript. There is intentionally no live
+  // captioning — that was the whole point of dropping the streaming path,
+  // since restart-on-silence dedup artifacts went with it.
   Future<void> _handleTalkStart() async {
     final state = context.read<ChatState>();
     state.setTalkActive(true);
-    _lastVoiceText = '';
+    state.setListening(true);
 
     final sink = state.voiceSink;
-    if (sink != null) {
-      sink.onStart();
-    } else {
+    if (sink == null) {
+      // Chat path: clear the input echo so a prior typed value doesn't
+      // ghost while we record. The sink path leaves its own field alone.
       state.setCurrentInput('');
+    } else {
+      sink.onStart();
     }
 
-    final ok = await _speech.initialize();
-    if (!ok) return;
-
-    _speechSub?.cancel();
-    _speechSub = _speech.listen().listen((transcript) {
-      if (!mounted) return;
-      _lastVoiceText = transcript;
-      final s = context.read<ChatState>().voiceSink;
-      if (s != null) {
-        s.onPartial(transcript);
-      } else {
-        context.read<ChatState>().setCurrentInput(transcript);
-      }
-    });
-
-    // NOTE: parallel MicLevelService.start() (getUserMedia + AnalyserNode)
-    // is intentionally NOT called here. On at least one tested browser,
-    // running a second audio capture alongside the recognizer starves it
-    // of audio — the bars animate but STT stops producing transcripts.
-    // The service is kept for a future fix (single-capture-with-two-
-    // consumers, if/when feasible). Until then, MicLevelBars uses its
-    // ripple fallback.
+    final ok = await _recorder.start();
+    if (!ok && mounted) {
+      // Permission denied or recorder failure. Flip back to idle so the
+      // user can retry without a "stuck listening" mic icon.
+      state.setListening(false);
+      state.setTalkActive(false);
+      state.addMessage(TextMessage(
+        content: '[mic] could not start recording '
+            '(permission denied or device unavailable)',
+        role: MessageRole.assistant,
+      ));
+    }
   }
 
   Future<void> _handleTalkEnd() async {
     final state = context.read<ChatState>();
+    // Capture the auth provider BEFORE any await so we never touch
+    // BuildContext across an async gap.
+    final auth = context.read<AuthService>();
     if (!state.isTalkActive) return;
-
-    await _speech.stop();
-    await _speechSub?.cancel();
-    _speechSub = null;
-
-    final text = _lastVoiceText.trim();
-    _lastVoiceText = '';
     state.setTalkActive(false);
+
+    final bytes = await _recorder.stop();
+
+    if (bytes == null || bytes.isEmpty) {
+      // Zero-length press, or recorder produced no samples (perm revoked
+      // mid-hold, etc). Quiet exit — don't pollute chat with a debug line.
+      if (mounted) state.setListening(false);
+      if (state.voiceSink == null) state.clearCurrentInput();
+      return;
+    }
+
+    final jwt = await auth.getAccessToken();
+    if (jwt == null) {
+      if (mounted) state.setListening(false);
+      state.addMessage(TextMessage(
+        content: '[stt] not authenticated',
+        role: MessageRole.assistant,
+      ));
+      return;
+    }
+
+    TranscribeResult result;
+    try {
+      result = await _stt.transcribe(
+        audio: bytes,
+        format: _recorder.format,
+        jwt: jwt,
+      );
+    } on SpeechError catch (e) {
+      if (!mounted) return;
+      state.setListening(false);
+      if (state.voiceSink == null) state.clearCurrentInput();
+      // 422 = audio was decoded but no speech detected. Surface as a
+      // gentle inline hint, not an "error". Everything else gets the raw
+      // code+detail so debugging is straightforward.
+      final msg = e.httpStatus == 422
+          ? "[stt] didn't catch that — try again"
+          : '[stt] ${e.code}: ${e.detail}';
+      state.addMessage(
+        TextMessage(content: msg, role: MessageRole.assistant),
+      );
+      return;
+    }
+
+    if (!mounted) return;
+    state.setListening(false);
+    final text = result.transcript.trim();
+    if (text.isEmpty) {
+      if (state.voiceSink == null) state.clearCurrentInput();
+      return;
+    }
 
     final sink = state.voiceSink;
     if (sink != null) {
@@ -697,16 +718,11 @@ class _ChatScreenState extends State<ChatScreen> {
       // the bloom's field AND append a running-log user message so the
       // chat behind the bloom shows each captured burst. We do NOT call
       // _sendMessage — the sink owns whatever happens next.
-      if (text.isNotEmpty) {
-        sink.onFinal(text);
-        state.addMessage(TextMessage(content: text, role: MessageRole.user));
-      }
+      sink.onFinal(text);
+      state.addMessage(TextMessage(content: text, role: MessageRole.user));
     } else {
-      // Chat path: clear the input echo, then send as a real turn.
       state.clearCurrentInput();
-      if (text.isNotEmpty) {
-        await _sendMessage(text);
-      }
+      await _sendMessage(text);
     }
   }
 
