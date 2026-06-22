@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -625,6 +626,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // dispatch the returned transcript. There is intentionally no live
   // captioning — that was the whole point of dropping the streaming path,
   // since restart-on-silence dedup artifacts went with it.
+  //
+  // All diagnostic feedback uses SnackBar (not addMessage) because when
+  // an overlay is open the chat output is hidden — addMessage would
+  // silently log to invisible chat. SnackBars float above the overlay.
   Future<void> _handleTalkStart() async {
     final state = context.read<ChatState>();
     state.setTalkActive(true);
@@ -632,52 +637,56 @@ class _ChatScreenState extends State<ChatScreen> {
 
     final sink = state.voiceSink;
     if (sink == null) {
-      // Chat path: clear the input echo so a prior typed value doesn't
-      // ghost while we record. The sink path leaves its own field alone.
       state.setCurrentInput('');
     } else {
       sink.onStart();
     }
 
-    final ok = await _recorder.start();
-    if (!ok && mounted) {
-      // Permission denied or recorder failure. Flip back to idle so the
-      // user can retry without a "stuck listening" mic icon.
+    bool ok;
+    try {
+      ok = await _recorder.start();
+    } catch (e) {
+      if (!mounted) return;
       state.setListening(false);
       state.setTalkActive(false);
-      state.addMessage(TextMessage(
-        content: '[mic] could not start recording '
-            '(permission denied or device unavailable)',
-        role: MessageRole.assistant,
-      ));
+      _toast('mic start threw: $e');
+      return;
+    }
+    if (!ok && mounted) {
+      state.setListening(false);
+      state.setTalkActive(false);
+      _toast('mic blocked (permission denied or device unavailable)');
     }
   }
 
   Future<void> _handleTalkEnd() async {
     final state = context.read<ChatState>();
-    // Capture the auth provider BEFORE any await so we never touch
-    // BuildContext across an async gap.
     final auth = context.read<AuthService>();
     if (!state.isTalkActive) return;
     state.setTalkActive(false);
 
-    final bytes = await _recorder.stop();
+    Uint8List? bytes;
+    try {
+      bytes = await _recorder.stop();
+    } catch (e) {
+      if (!mounted) return;
+      state.setListening(false);
+      _toast('mic stop threw: $e');
+      return;
+    }
 
     if (bytes == null || bytes.isEmpty) {
-      // Zero-length press, or recorder produced no samples (perm revoked
-      // mid-hold, etc). Quiet exit — don't pollute chat with a debug line.
       if (mounted) state.setListening(false);
       if (state.voiceSink == null) state.clearCurrentInput();
+      _toast('recorder produced 0 bytes (likely web pcm16 unsupported '
+          'or zero-length press)');
       return;
     }
 
     final jwt = await auth.getAccessToken();
     if (jwt == null) {
       if (mounted) state.setListening(false);
-      state.addMessage(TextMessage(
-        content: '[stt] not authenticated',
-        role: MessageRole.assistant,
-      ));
+      _toast('stt: not authenticated');
       return;
     }
 
@@ -692,15 +701,15 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       state.setListening(false);
       if (state.voiceSink == null) state.clearCurrentInput();
-      // 422 = audio was decoded but no speech detected. Surface as a
-      // gentle inline hint, not an "error". Everything else gets the raw
-      // code+detail so debugging is straightforward.
-      final msg = e.httpStatus == 422
-          ? "[stt] didn't catch that — try again"
-          : '[stt] ${e.code}: ${e.detail}';
-      state.addMessage(
-        TextMessage(content: msg, role: MessageRole.assistant),
-      );
+      _toast(e.httpStatus == 422
+          ? "didn't catch that — try again"
+          : 'stt ${e.code}: ${e.detail}');
+      return;
+    } catch (e) {
+      if (!mounted) return;
+      state.setListening(false);
+      if (state.voiceSink == null) state.clearCurrentInput();
+      _toast('stt threw: $e');
       return;
     }
 
@@ -709,20 +718,35 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = result.transcript.trim();
     if (text.isEmpty) {
       if (state.voiceSink == null) state.clearCurrentInput();
+      _toast('stt returned empty transcript (${result.durationSeconds}s audio)');
       return;
     }
 
     final sink = state.voiceSink;
     if (sink != null) {
       // Sink path (e.g. Journal overlay): commit the final transcript to
-      // the overlay's field. We do NOT also addMessage — overlays own
-      // their own display surface; duplicating the line into chat-output
-      // is noise (and chat-output is often hidden behind the overlay).
+      // the overlay's field. Overlays own their own display surface; we
+      // do NOT also addMessage (chat-output is hidden anyway).
       sink.onFinal(text);
     } else {
       state.clearCurrentInput();
       await _sendMessage(text);
     }
+  }
+
+  // Floats a short debug/feedback message above whatever is on screen —
+  // safe to call while an overlay is hiding chat-output. Floating
+  // SnackBar so it sits above the chat-input row.
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   // Renders the active left-nav overlay into the chat-output slot. See
