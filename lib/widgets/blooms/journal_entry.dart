@@ -216,8 +216,15 @@ class _JournalEntryState extends State<JournalEntry> {
 
     try {
       final saved = await _service.createEntry(entry, jwt);
-      if (_photo != null && saved.journalEntryId != null) {
-        await _service.uploadPhoto(saved.journalEntryId!, _photo!.path, jwt);
+      if (_photo != null &&
+          _photoBytes != null &&
+          saved.journalEntryId != null) {
+        await _service.uploadPhoto(
+          saved.journalEntryId!,
+          _photoBytes!,
+          _photo!.name,
+          jwt,
+        );
       }
       if (!mounted) return;
       widget.onSaved?.call(_confirmationFor(saved));

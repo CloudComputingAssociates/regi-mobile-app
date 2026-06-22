@@ -71,10 +71,30 @@ class SpeechService {
 
   void _snapshotChunk() {
     if (_currentChunk.isEmpty) return;
-    _cumulative = _cumulative.isEmpty
-        ? _currentChunk
-        : '$_cumulative $_currentChunk';
+    _cumulative = _join(_cumulative, _currentChunk);
     _currentChunk = '';
+  }
+
+  // Heuristic dedup for the restart-on-silence join. Continuous STT is
+  // never clean here — when the platform engine self-terminates and we
+  // restart, the next session frequently re-recognizes the tail (web
+  // re-emits more aggressively than Android). Cases:
+  //   - new engine session re-recognizes the whole prior cumulative
+  //     from the top  → use the longer chunk as-is
+  //   - the chunk is already the tail of the current cumulative
+  //     (partial re-emit)  → drop it
+  //   - identical strings  → no-op
+  //   - otherwise the chunk is genuinely new → space-join
+  // Within-breath repetition arrives as a SINGLE chunk and is preserved
+  // — only cross-restart duplication is squashed. AI cleanup is a
+  // separate downstream pass.
+  String _join(String base, String chunk) {
+    if (chunk.isEmpty) return base;
+    if (base.isEmpty) return chunk;
+    if (chunk == base) return base;
+    if (chunk.startsWith(base)) return chunk;
+    if (base.endsWith(chunk)) return base;
+    return '$base $chunk';
   }
 
   void _startEngine() {
@@ -84,10 +104,7 @@ class SpeechService {
           final c = _transcripts;
           if (c == null || c.isClosed) return;
           _currentChunk = result.recognizedWords;
-          final combined = _cumulative.isEmpty
-              ? _currentChunk
-              : '$_cumulative $_currentChunk';
-          c.add(combined);
+          c.add(_join(_cumulative, _currentChunk));
         },
         listenOptions: stt.SpeechListenOptions(
           listenFor: const Duration(minutes: 5),
