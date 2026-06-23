@@ -95,11 +95,6 @@ class _ChatInputState extends State<ChatInput> {
             // Row 1: TTS controls (left) + input mode + Talk (right)
             Row(
               children: [
-                _SpeedButton(
-                  rate: state.ttsRate,
-                  onChanged: state.setTtsRate,
-                ),
-                const SizedBox(width: 6),
                 _MuteButton(
                   enabled: state.ttsEnabled,
                   onTap: widget.onTtsToggle,
@@ -159,68 +154,6 @@ class _ChatInputState extends State<ChatInput> {
                   onTap: _handleSend,
                 ),
               ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SpeedButton extends StatelessWidget {
-  const _SpeedButton({required this.rate, required this.onChanged});
-
-  final double rate;
-  final ValueChanged<double> onChanged;
-
-  static const _presets = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-
-  @override
-  Widget build(BuildContext context) {
-    return PopupMenuButton<double>(
-      tooltip: 'Playback speed',
-      onSelected: onChanged,
-      color: const Color(0xFF252525),
-      itemBuilder: (_) => [
-        for (final p in _presets)
-          PopupMenuItem<double>(
-            value: p,
-            child: Row(
-              children: [
-                if ((p - rate).abs() < 0.001)
-                  const Icon(Icons.check,
-                      size: 14, color: Color(0xFFF2B33D))
-                else
-                  const SizedBox(width: 14),
-                const SizedBox(width: 6),
-                Text(
-                  '${p.toStringAsFixed(2)}×',
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-      ],
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF555555),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.speed, size: 14, color: Colors.white70),
-            const SizedBox(width: 4),
-            Text(
-              '${rate.toStringAsFixed(2)}×',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
             ),
           ],
         ),

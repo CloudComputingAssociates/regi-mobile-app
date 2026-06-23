@@ -113,31 +113,26 @@ registered a sink last.
   `initState` and clear it in `dispose`. Use `context.read<ChatState>()`
   in both places (one-shot, not a `watch`).
 
-### No ghost-disabled actions
+### No ghost-disabled COLORED AppBar actions
 
-Action affordances (AppBar icons, overlay-scoped Save, etc.) should
-**appear when actionable and disappear when not** — never render in a
-greyed/half-opacity "disabled" state. A persistent muddy icon is visual
-noise; a clean conditional render reads as "Save lights up the moment
-there's something to save."
+The colored primary AppBar actions (green Save, red Close) **appear
+when actionable and disappear when not** — never render in a
+greyed/half-opacity "disabled" state. A persistent muddy colored icon
+is visual noise. The Close (`×`) is the only colored action that stays
+visible whenever the surface is open, since closure is always
+actionable. (For v1 the green Save is dropped entirely — overlays
+autosave.)
 
-Apply this to:
-- AppBar overlay-Save icon: render iff `state.overlayActions?.canSave == true`.
-- Bloom/overlay primary actions tied to dirty/in-progress state.
-- Any drawer/menu entry whose target route hasn't shipped yet (omit it
-  rather than render disabled).
+This rule is scoped to the colored primary affordances. Plain
+inline form icons (e.g. a trash icon next to a Thoughts field) MAY use
+a normal "greyed when there's nothing to act on, brightens when there
+is" pattern — that's standard form-control behavior, not a ghost
+action.
 
-Exceptions:
-- Close (`×`) stays visible whenever closure is possible — close is
-  always actionable while the surface is open, so it's never disabled.
-- Destructive confirms inside modals can grey out until preconditions
-  are met (e.g. typing the deletion phrase) — that's confirmation
-  ceremony, not an action affordance.
-
-The icon weight should match its peers too: prefer stroke-style glyphs
-(`Icons.check`, `Icons.close`) over filled-disc variants
-(`Icons.check_circle`, `Icons.cancel`) when sitting alongside other
-AppBar actions, so colored icons don't visually overflow the bar.
+When colored icons do sit alongside other AppBar actions, prefer
+stroke-style glyphs (`Icons.check`, `Icons.close`) over filled-disc
+variants (`Icons.check_circle`, `Icons.cancel`) so they match peer
+icons' visual weight and don't overflow the bar.
 
 ## What lives where
 

@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
-import '../services/overlay_actions.dart';
 import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
@@ -14,17 +13,12 @@ class ChatState extends ChangeNotifier {
   String? _sessionId;
   String _currentInput = '';
   bool _ttsEnabled = true;
-  double _ttsRate = 1.25;
   String? _activeBloom;
   // Left-nav full-area destination (Add Food, Enter Journal). Independent
   // of [_activeBloom] — a bloom can appear ON TOP of an overlay; both
   // close independently. See CLAUDE.md for the overlay vs bloom split.
   String? _activeOverlay;
   VoiceSink? _voiceSink;
-  // Optional save bridge for the active overlay. Registered by overlays
-  // that want a Save affordance in the AppBar (e.g. Journal). Null when
-  // no overlay is open or the overlay doesn't have a save flow.
-  OverlayActions? _overlayActions;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -34,20 +28,9 @@ class ChatState extends ChangeNotifier {
   String? get sessionId => _sessionId;
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
-  double get ttsRate => _ttsRate;
   String? get activeBloom => _activeBloom;
   String? get activeOverlay => _activeOverlay;
   VoiceSink? get voiceSink => _voiceSink;
-  OverlayActions? get overlayActions => _overlayActions;
-
-  /// Registers (or clears) the AppBar Save bridge for the active
-  /// overlay. Notifies because AppBar visibility/enable derives from
-  /// presence and canSave.
-  void setOverlayActions(OverlayActions? a) {
-    if (identical(_overlayActions, a)) return;
-    _overlayActions = a;
-    notifyListeners();
-  }
 
   /// Registers (or clears) the routing target for the global PTT mic.
   /// While non-null, ChatScreen pipes transcripts through the sink
@@ -153,15 +136,6 @@ class ChatState extends ChangeNotifier {
 
   void toggleTts() {
     _ttsEnabled = !_ttsEnabled;
-    notifyListeners();
-  }
-
-  /// Clamps to GCP TTS's accepted range (0.25..4.0). Practical UI range
-  /// is narrower (e.g. 0.75..2.0) — clamping defends against bad input.
-  void setTtsRate(double rate) {
-    final clamped = rate.clamp(0.25, 4.0);
-    if ((clamped - _ttsRate).abs() < 0.001) return;
-    _ttsRate = clamped;
     notifyListeners();
   }
 

@@ -415,18 +415,10 @@ class _ChatScreenState extends State<ChatScreen> {
     return '$error';
   }
 
-  // Called by the Journal bloom after a successful save. Mirrors the
-  // "reflect it back" spirit of _regiSay — adds an assistant message and,
-  // if TTS is on, speaks it. The bloom passes a pre-formatted confirmation
-  // like "Journaled for Jun 22 — 396 lb".
-  void _onJournalSaved(String confirmation) {
-    _regiSay(confirmation);
-  }
-
   // Display + speak a Regi utterance. Mirrors the TTS code path in
-  // _doSendMessage (same _pinnedVoiceId + state.ttsRate, same fresh-JWT
-  // fetch, same TtsException handling) so command responses sound
-  // identical to chat replies. No-op on empty text.
+  // _doSendMessage (same _pinnedVoiceId, same fresh-JWT fetch, same
+  // TtsException handling) so command responses sound identical to chat
+  // replies. No-op on empty text.
   void _regiSay(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
@@ -436,7 +428,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!state.ttsEnabled) return;
 
     final auth = context.read<AuthService>();
-    final rate = state.ttsRate;
     unawaited(() async {
       final jwt = await auth.getAccessToken();
       if (jwt == null) return;
@@ -445,7 +436,6 @@ class _ChatScreenState extends State<ChatScreen> {
           text,
           jwt: jwt,
           voice: _pinnedVoiceId,
-          speakingRate: rate,
         );
       } on TtsException catch (e) {
         if (!mounted) return;
@@ -515,7 +505,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (state.ttsEnabled && stream.content.trim().isNotEmpty) {
       final replyText = stream.content;
       const voiceId = _pinnedVoiceId;
-      final rate = state.ttsRate;
       unawaited(() async {
         final freshJwt = await auth.getAccessToken() ?? jwt;
         try {
@@ -523,7 +512,6 @@ class _ChatScreenState extends State<ChatScreen> {
             replyText,
             jwt: freshJwt,
             voice: voiceId,
-            speakingRate: rate,
           );
         } on TtsException catch (e) {
           if (!mounted) return;
@@ -780,7 +768,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _renderOverlay(String key) {
     switch (key) {
       case 'Journal':
-        return JournalEntry(onSaved: _onJournalSaved);
+        return const JournalEntry();
       case 'AddFood':
         return const Center(
           child: Text(
@@ -904,19 +892,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
         actions: [
-          // Overlay-scoped actions appear first so they sit at the
-          // right-edge of the bar (green save + red close, mac-style).
-          // Save magically appears the moment there's something to
-          // save (per CLAUDE.md "no ghost-disabled actions"). Plain
-          // stroke glyph so it sits at the same visual weight as the
-          // surrounding AppBar icons instead of overflowing as a filled
-          // disc.
-          if (state.overlayActions?.canSave == true)
-            IconButton(
-              icon: const Icon(Icons.check, color: Color(0xFF4CAF50)),
-              tooltip: 'Save',
-              onPressed: state.overlayActions!.onSave,
-            ),
+          // Red × Close is the only colored AppBar action — it sits at
+          // the right edge whenever an overlay is open. Overlays
+          // autosave, so there is no Save icon. The chat-only Clear
+          // action hides while an overlay is active because we don't
+          // wipe form state out from under autosave.
           if (state.activeOverlay != null)
             IconButton(
               icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
@@ -929,11 +909,12 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () =>
                 context.read<ChatState>().openBloom('UserSettings'),
           ),
-          IconButton(
-            icon: const Icon(Icons.clear_all),
-            tooltip: 'Clear',
-            onPressed: _handleNewChat,
-          ),
+          if (state.activeOverlay == null)
+            IconButton(
+              icon: const Icon(Icons.clear_all),
+              tooltip: 'Clear',
+              onPressed: _handleNewChat,
+            ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',

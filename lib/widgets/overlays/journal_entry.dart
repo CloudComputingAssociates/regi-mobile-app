@@ -8,7 +8,6 @@ import 'package:provider/provider.dart';
 import '../../models/journal_entry.dart' as model;
 import '../../services/auth_service.dart';
 import '../../services/journal_service.dart';
-import '../../services/overlay_actions.dart';
 import '../../services/voice_sink.dart';
 import '../../state/chat_state.dart';
 
@@ -29,16 +28,16 @@ import '../../state/chat_state.dart';
 /// never fires here. [VoiceSink.onFinal] is the sole text-mutation
 /// point. The partial callback is retained for the contract (a future
 /// streaming consumer can wire it) but ChatScreen will not call it.
+///
+/// SAVE: there is no manual Save UI. Every form mutation schedules a
+/// debounced (1.5s) POST upsert; photo pick fires an immediate save
+/// (so the photo upload can run against the resulting entry id); a
+/// voice utterance of "save" / "save it" / "save entry" is intercepted
+/// in onFinal as a command and triggers an immediate save instead of
+/// appending to Thoughts. Clearing thoughts persists as `""` on the
+/// next autosave.
 class JournalEntry extends StatefulWidget {
-  const JournalEntry({
-    super.key,
-    this.onSaved,
-  });
-
-  /// Fired after a successful save with a short confirmation line (e.g.
-  /// "Journaled for Jun 22 — 396 lb") that the parent reflects back as
-  /// an assistant message + TTS.
-  final void Function(String confirmation)? onSaved;
+  const JournalEntry({super.key});
 
   @override
   State<JournalEntry> createState() => _JournalEntryState();
@@ -77,15 +76,29 @@ class _JournalEntryState extends State<JournalEntry> {
   String? _existingPhotoUrl;
   bool _isSaving = false;
   bool _isLoading = true;
-  // Becomes true on the first user mutation after the prefill settles.
-  // Save is gated on this so a freshly-opened (pre-filled-from-server)
-  // form doesn't offer Save until the user has actually changed
-  // something — the user explicitly asked for this.
-  bool _isDirty = false;
   // True while _prefillFrom is writing into controllers, so the
-  // controller listeners that fire don't get counted as "user mutated
-  // the form."
+  // controller listeners that fire don't kick off an autosave for
+  // server-populated values.
   bool _isPrefilling = false;
+  // Debounced-save timer. Cancelled and rescheduled on every mutation
+  // so a burst of edits collapses into one POST 1.5s after the last
+  // edit. Cancelled and fired-immediately by photo-pick and voice
+  // "save" command paths.
+  Timer? _autosaveTimer;
+  static const _autosaveDebounce = Duration(milliseconds: 1500);
+
+  // Voice commands intercepted in onFinal instead of being appended to
+  // the Thoughts field. Local exact-match (case/whitespace-insensitive,
+  // trailing punctuation stripped) so "save" triggers save but "I will
+  // save my work later" appends as text. No command-gate roundtrip.
+  static const Set<String> _saveCommandPhrases = {
+    'save',
+    'save it',
+    'save now',
+    'save this',
+    'save entry',
+    'save journal',
+  };
 
   // Snapshot of _thoughts.text taken at mic-press (sink.onStart). The
   // batch-transcribed final text is appended to this prefix in onFinal so
@@ -110,54 +123,66 @@ class _JournalEntryState extends State<JournalEntry> {
       onPartial: (c) => _setThoughtsText(
         _thoughtsPrefix.isEmpty ? c : '$_thoughtsPrefix $c',
       ),
-      onFinal: (text) {
-        final combined = _thoughtsPrefix.isEmpty
-            ? text
-            : '$_thoughtsPrefix${_separatorAfter(_thoughtsPrefix)}$text';
-        _setThoughtsText(combined);
-        _thoughtsPrefix = combined;
-        // Voice dictation IS a user mutation.
-        _markDirty();
-      },
+      onFinal: _onVoiceFinal,
     ));
-    // Defer the first publish until after the current build completes.
-    // Calling setOverlayActions() synchronously from initState runs
-    // during the parent's build phase, where the resulting
-    // notifyListeners() can be silently dropped — leaving the AppBar
-    // with overlayActions == null and no Save icon at all.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _publishActions());
     unawaited(_loadTodayEntry());
+  }
+
+  /// Called by ChatScreen with the final transcript from a PTT hold.
+  /// If the utterance is a save command, fire an immediate save (don't
+  /// append it to Thoughts — the user wouldn't want their command word
+  /// shoved into their journal). Otherwise append + schedule autosave.
+  void _onVoiceFinal(String text) {
+    if (_isSaveCommand(text)) {
+      // Refresh the prefix so the NEXT dictation starts from current
+      // Thoughts (didn't get mutated by this command).
+      _thoughtsPrefix = _thoughts.text;
+      _saveNow();
+      return;
+    }
+    final combined = _thoughtsPrefix.isEmpty
+        ? text
+        : '$_thoughtsPrefix${_separatorAfter(_thoughtsPrefix)}$text';
+    _setThoughtsText(combined);
+    _thoughtsPrefix = combined;
+    // The controller-text change above also fires _onFormMutated which
+    // schedules autosave — no explicit call needed here.
+  }
+
+  bool _isSaveCommand(String text) {
+    // Strip trailing punctuation and collapse internal whitespace, then
+    // lowercase. Catches "Save.", "  Save it ", "SAVE NOW" alike.
+    final normalized = text
+        .trim()
+        .replaceAll(RegExp(r'[.!?,;:]+\$'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .toLowerCase();
+    return _saveCommandPhrases.contains(normalized);
   }
 
   /// Called from every form-field listener AND every non-listener
   /// mutation (date pick, unit toggle, photo pick/clear, thoughts trash).
-  /// Suppresses dirty during prefill so a server-populated form doesn't
-  /// arrive already-dirty. After the first real mutation, republishes
-  /// OverlayActions so the AppBar Save icon enables.
+  /// Suppresses during prefill so a server-populated form doesn't
+  /// instantly bounce back as an autosave. Reschedules the debounced
+  /// autosave timer.
   void _onFormMutated() {
     if (!mounted || _isPrefilling) return;
-    _markDirty();
+    _scheduleAutosave();
     setState(() {});
   }
 
-  void _markDirty() {
-    if (_isPrefilling || _isDirty) {
-      // Either we're prefilling (don't count) or we're already dirty
-      // (state hasn't changed). Either way, no republish needed.
-      return;
-    }
-    _isDirty = true;
-    _publishActions();
+  void _scheduleAutosave() {
+    _autosaveTimer?.cancel();
+    _autosaveTimer = Timer(_autosaveDebounce, _saveNow);
   }
 
-  /// Registers the current Save bridge with ChatState. Called whenever
-  /// canSave could have changed (dirty flip, save start/end, dispose).
-  void _publishActions() {
-    if (!mounted) return;
-    context.read<ChatState>().setOverlayActions(OverlayActions(
-      onSave: () => unawaited(_save()),
-      canSave: _isDirty && !_isSaving,
-    ));
+  /// Fires immediately, cancelling any pending debounced save. Used by
+  /// photo-pick (we need the entry id ASAP to upload against) and the
+  /// voice "save" command (user explicitly asked).
+  void _saveNow() {
+    _autosaveTimer?.cancel();
+    _autosaveTimer = null;
+    unawaited(_save());
   }
 
   /// Cross-device coherence: GETs today's entry on mount so a user who
@@ -234,14 +259,18 @@ class _JournalEntryState extends State<JournalEntry> {
 
   @override
   void dispose() {
-    // Clear voice sink + overlay actions so any in-flight PTT release
-    // routes back to the chat default, the PTT button hides (unless the
-    // user explicitly chose Voice in the slider), and the AppBar Save
-    // icon disappears.
+    // Cancel any pending autosave — there's no way to flush a debounced
+    // POST during dispose (HTTP is async, dispose is sync, and we're
+    // about to close the http.Client). The 1.5s of latest edits will
+    // be lost if the user closes the overlay mid-debounce. Acceptable
+    // trade-off; if it becomes a real complaint, hook closeOverlay() to
+    // request a flush before the widget tears down.
+    _autosaveTimer?.cancel();
+    // Clear voice sink so any in-flight PTT release routes back to the
+    // chat default and the PTT button hides (unless the user explicitly
+    // chose Voice in the slider).
     try {
-      final cs = context.read<ChatState>();
-      cs.setVoiceSink(null);
-      cs.setOverlayActions(null);
+      context.read<ChatState>().setVoiceSink(null);
     } catch (_) {
       // context may already be unmounted in pathological teardown paths.
     }
@@ -274,7 +303,11 @@ class _JournalEntryState extends State<JournalEntry> {
         _photo = xfile;
         _photoBytes = bytes;
       });
-      _markDirty();
+      // Photo upload runs against the entry id, so we need the entry
+      // to exist server-side before we can PUT the photo. Fire an
+      // immediate save (bypass debounce) — the upload runs inside the
+      // save flow once upsertEntry returns.
+      _saveNow();
     } catch (e) {
       if (!mounted) return;
       _toast('Photo picker error: $e');
@@ -292,7 +325,7 @@ class _JournalEntryState extends State<JournalEntry> {
       _photoBytes = null;
       _existingPhotoUrl = null;
     });
-    _markDirty();
+    _scheduleAutosave();
   }
 
   // ───────── Date ─────────
@@ -307,17 +340,19 @@ class _JournalEntryState extends State<JournalEntry> {
     );
     if (picked == null || !mounted) return;
     setState(() => _entryDate = picked);
-    _markDirty();
+    _scheduleAutosave();
   }
 
   // ───────── Save ─────────
 
+  /// Single save path for all triggers (debounced autosave, photo pick,
+  /// voice "save" command). No dirty gate — if the timer fires or
+  /// something explicitly called this, we're saving. _isSaving guards
+  /// against re-entry; a save scheduled while one is in flight will
+  /// be picked up on the next mutation.
   Future<void> _save() async {
-    if (_isSaving || !_isDirty) return;
-    setState(() {
-      _isSaving = true;
-    });
-    _publishActions();
+    if (_isSaving) return;
+    setState(() => _isSaving = true);
 
     final measurementsMap = <String, dynamic>{};
     _measurements.forEach((k, c) {
@@ -327,19 +362,22 @@ class _JournalEntryState extends State<JournalEntry> {
 
     final weightNum = double.tryParse(_weight.text.trim());
     final thoughtsText = _thoughts.text.trim();
+    // Send "" for thoughts when the user cleared the field — backend
+    // treats empty-string and null the same way and overwrites the
+    // stored value. This is how the trash icon's clear-then-autosave
+    // propagates to the server.
     final entry = model.JournalEntry(
       entryDate: _wireDate(_entryDate),
       weight: weightNum,
       weightUnit: _weightUnit,
       measurements: measurementsMap,
-      thoughts: thoughtsText.isEmpty ? null : thoughtsText,
+      thoughts: thoughtsText,
     );
 
     final jwt = await context.read<AuthService>().getAccessToken();
     if (jwt == null) {
       if (!mounted) return;
       setState(() => _isSaving = false);
-      _publishActions();
       _toast('Not authenticated.');
       return;
     }
@@ -357,17 +395,16 @@ class _JournalEntryState extends State<JournalEntry> {
         );
       }
       if (!mounted) return;
-      widget.onSaved?.call(_confirmationFor(saved));
-      context.read<ChatState>().closeOverlay();
+      setState(() => _isSaving = false);
+      // Autosave is silent — no chat message, no overlay close. Close
+      // is only via the red × in the AppBar.
     } on JournalException catch (e) {
       if (!mounted) return;
       setState(() => _isSaving = false);
-      _publishActions();
       _toast('Save failed: HTTP ${e.statusCode} ${e.body}');
     } catch (e) {
       if (!mounted) return;
       setState(() => _isSaving = false);
-      _publishActions();
       _toast('Save failed: $e');
     }
   }
@@ -384,16 +421,6 @@ class _JournalEntryState extends State<JournalEntry> {
       behavior: SnackBarBehavior.floating,
       duration: const Duration(seconds: 4),
     ));
-  }
-
-  String _confirmationFor(model.JournalEntry saved) {
-    final dateStr = _humanDate(_entryDate);
-    final w = saved.weight ?? double.tryParse(_weight.text.trim());
-    if (w == null) return 'Journaled for $dateStr';
-    final unit = saved.weightUnit;
-    final wFmt =
-        w == w.roundToDouble() ? w.toInt().toString() : w.toStringAsFixed(1);
-    return 'Journaled for $dateStr — $wFmt $unit';
   }
 
   // ───────── Formatting ─────────
@@ -658,7 +685,7 @@ class _JournalEntryState extends State<JournalEntry> {
     }
     _setThoughtsText('');
     _thoughtsPrefix = '';
-    _markDirty();
+    _scheduleAutosave();
   }
 
   Widget _weightSection() {
@@ -702,7 +729,7 @@ class _JournalEntryState extends State<JournalEntry> {
     return InkWell(
       onTap: () {
         setState(() => _weightUnit = _weightUnit == 'lb' ? 'kg' : 'lb');
-        _markDirty();
+        _scheduleAutosave();
       },
       borderRadius: BorderRadius.circular(8),
       child: Container(
