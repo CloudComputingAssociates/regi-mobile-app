@@ -906,25 +906,20 @@ class _ChatScreenState extends State<ChatScreen> {
         actions: [
           // Overlay-scoped actions appear first so they sit at the
           // right-edge of the bar (green save + red close, mac-style).
-          if (state.overlayActions != null)
+          // Save magically appears the moment there's something to
+          // save (per CLAUDE.md "no ghost-disabled actions"). Plain
+          // stroke glyph so it sits at the same visual weight as the
+          // surrounding AppBar icons instead of overflowing as a filled
+          // disc.
+          if (state.overlayActions?.canSave == true)
             IconButton(
-              icon: Icon(
-                Icons.check_circle,
-                color: state.overlayActions!.canSave
-                    ? const Color(0xFF4CAF50)
-                    : Colors.white24,
-              ),
+              icon: const Icon(Icons.check, color: Color(0xFF4CAF50)),
               tooltip: 'Save',
-              onPressed: state.overlayActions!.canSave
-                  ? state.overlayActions!.onSave
-                  : null,
+              onPressed: state.overlayActions!.onSave,
             ),
           if (state.activeOverlay != null)
             IconButton(
-              icon: const Icon(
-                Icons.cancel,
-                color: Color(0xFFFF5F57),
-              ),
+              icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
               tooltip: 'Close ${state.activeOverlay}',
               onPressed: () => context.read<ChatState>().closeOverlay(),
             ),

@@ -113,6 +113,32 @@ registered a sink last.
   `initState` and clear it in `dispose`. Use `context.read<ChatState>()`
   in both places (one-shot, not a `watch`).
 
+### No ghost-disabled actions
+
+Action affordances (AppBar icons, overlay-scoped Save, etc.) should
+**appear when actionable and disappear when not** — never render in a
+greyed/half-opacity "disabled" state. A persistent muddy icon is visual
+noise; a clean conditional render reads as "Save lights up the moment
+there's something to save."
+
+Apply this to:
+- AppBar overlay-Save icon: render iff `state.overlayActions?.canSave == true`.
+- Bloom/overlay primary actions tied to dirty/in-progress state.
+- Any drawer/menu entry whose target route hasn't shipped yet (omit it
+  rather than render disabled).
+
+Exceptions:
+- Close (`×`) stays visible whenever closure is possible — close is
+  always actionable while the surface is open, so it's never disabled.
+- Destructive confirms inside modals can grey out until preconditions
+  are met (e.g. typing the deletion phrase) — that's confirmation
+  ceremony, not an action affordance.
+
+The icon weight should match its peers too: prefer stroke-style glyphs
+(`Icons.check`, `Icons.close`) over filled-disc variants
+(`Icons.check_circle`, `Icons.cancel`) when sitting alongside other
+AppBar actions, so colored icons don't visually overflow the bar.
+
 ## What lives where
 
 | File | Purpose |

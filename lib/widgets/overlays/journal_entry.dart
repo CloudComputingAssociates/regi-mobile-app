@@ -120,7 +120,12 @@ class _JournalEntryState extends State<JournalEntry> {
         _markDirty();
       },
     ));
-    _publishActions();
+    // Defer the first publish until after the current build completes.
+    // Calling setOverlayActions() synchronously from initState runs
+    // during the parent's build phase, where the resulting
+    // notifyListeners() can be silently dropped — leaving the AppBar
+    // with overlayActions == null and no Save icon at all.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _publishActions());
     unawaited(_loadTodayEntry());
   }
 
