@@ -466,10 +466,15 @@ class _JournalEntryState extends State<JournalEntry>
       if (_photo != null &&
           _photoBytes != null &&
           saved.journalEntryId != null) {
+        // Send a clean, predictable filename rather than `_photo!.name`,
+        // which on some pickers (notably web file-input) can be a path-
+        // shaped string like "3/5.jpg" that the server then mis-stores
+        // as the URL field. entryDate-based name is unambiguous, has no
+        // slashes, and stays unique per (user, date).
         final updated = await _service.uploadPhoto(
           saved.journalEntryId!,
           _photoBytes!,
-          _photo!.name,
+          'photo_${_wireDate(_entryDate)}.jpg',
           jwt,
         );
         // Photo is now persisted; promote it from the local "freshly
