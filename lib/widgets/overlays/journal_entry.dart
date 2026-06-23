@@ -608,27 +608,23 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   Widget _photoSection() {
+    final hasPhoto = _photoBytes != null || _existingPhotoUrl != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionTitle('Photo'),
-        Row(
-          children: [
-            _pillButton(
-              icon: Icons.photo_camera,
-              label: 'Snap a photo',
-              onTap: () => _pickPhoto(ImageSource.camera),
-            ),
-            const SizedBox(width: 8),
-            _pillButton(
-              icon: Icons.image,
-              label: 'Choose',
-              onTap: () => _pickPhoto(ImageSource.gallery),
-            ),
-          ],
-        ),
-        if (_photoBytes != null || _existingPhotoUrl != null) ...[
-          const SizedBox(height: 10),
+        // Mutually exclusive: either an "Add Photo" entry point (when
+        // there's nothing attached) OR the photo preview with its ×
+        // delete (when there is). The Add button never sits alongside
+        // the photo — once a photo exists the only operation is delete,
+        // and deleting brings the Add button back.
+        if (!hasPhoto)
+          _pillButton(
+            icon: Icons.add_a_photo,
+            label: 'Add Photo',
+            onTap: _openAddPhotoBloom,
+          )
+        else
           SizedBox(
             width: 140,
             height: 140,
@@ -663,7 +659,7 @@ class _JournalEntryState extends State<JournalEntry>
                       width: 26,
                       height: 26,
                       decoration: const BoxDecoration(
-                        color: Colors.black87,
+                        color: Color(0xFFFF5F57),
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
@@ -685,8 +681,94 @@ class _JournalEntryState extends State<JournalEntry>
               ],
             ),
           ),
-        ],
       ],
+    );
+  }
+
+  /// Opens a small bloom-styled chooser (yellow-bordered panel) above
+  /// the Journal overlay so the user can pick between camera and
+  /// gallery. Inline rather than a global bloom because it's tightly
+  /// scoped to "where does the next photo come from" — no need to
+  /// register it via ChatState.openBloom.
+  Future<void> _openAddPhotoBloom() async {
+    final source = await showDialog<ImageSource>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 24),
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF252525),
+            border: Border.all(color: const Color(0xFFF2B33D), width: 2),
+            borderRadius: BorderRadius.circular(14),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 14, 20, 10),
+                child: Text(
+                  'Add Photo',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              _photoSourceOption(
+                ctx,
+                icon: Icons.photo_camera,
+                label: 'Take a Picture',
+                source: ImageSource.camera,
+              ),
+              _photoSourceOption(
+                ctx,
+                icon: Icons.photo_library,
+                label: 'Upload from Library',
+                source: ImageSource.gallery,
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text(
+                  'Cancel',
+                  style: TextStyle(color: Colors.white70),
+                ),
+              ),
+              const SizedBox(height: 4),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (source != null) {
+      await _pickPhoto(source);
+    }
+  }
+
+  Widget _photoSourceOption(
+    BuildContext ctx, {
+    required IconData icon,
+    required String label,
+    required ImageSource source,
+  }) {
+    return InkWell(
+      onTap: () => Navigator.pop(ctx, source),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+        child: Row(
+          children: [
+            Icon(icon, color: Colors.white70, size: 22),
+            const SizedBox(width: 14),
+            Text(
+              label,
+              style: const TextStyle(color: Colors.white, fontSize: 15),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
