@@ -98,6 +98,37 @@ class JournalService {
     return null;
   }
 
+  /// GET {base}/journal/{id} — entry detail. Unlike the LIST endpoint
+  /// (which by server design omits photoSignedUrl to save signing
+  /// calls), this is the read path that mints a fresh V4 signed URL
+  /// into the response when a photo is attached. The overlay's prefill
+  /// flow calls LIST to find today's id, then this to get the URL.
+  Future<JournalEntry?> getEntryById(int id, String jwt) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final res = await _client.get(
+      Uri.parse('$base/journal/$id'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+    );
+    if (res.statusCode == 404) return null;
+    if (res.statusCode != 200) {
+      throw JournalException(res.statusCode, res.body);
+    }
+    final decoded = jsonDecode(res.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw JournalException(
+        res.statusCode,
+        'expected JSON object, got ${decoded.runtimeType}',
+      );
+    }
+    return JournalEntry.fromJson(decoded);
+  }
+
   /// LOCAL calendar date as YYYY-MM-DD. A user in PST opening the app at
   /// 11:30pm should see the PST date, not the UTC-rolled-over date.
   static String _localDateString(DateTime d) {

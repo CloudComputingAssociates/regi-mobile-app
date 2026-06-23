@@ -241,7 +241,16 @@ class _JournalEntryState extends State<JournalEntry>
 
   /// Cross-device coherence: GETs today's entry on mount so a user who
   /// saved on the web sees the same state on the phone. Empty result
-  /// → blank form; populated → pre-fill every field + remember the id.
+  /// → blank form; populated → pre-fill every field.
+  ///
+  /// Two-call dance: LIST (`GET /api/journal?from=&to=&limit=1`) returns
+  /// today's id but NOT photoSignedUrl (the server intentionally omits
+  /// signed URLs from list responses — see CLAUDE.md / regi-api comment
+  /// at services/journal_service.go:71-72). So when an entry exists, we
+  /// follow up with the detail endpoint (`GET /api/journal/{id}`), which
+  /// mints a fresh signed URL into photoSignedUrl. The detail response
+  /// is what we actually prefill from.
+  ///
   /// Silent on failure so a flaky network doesn't block journaling.
   Future<void> _loadTodayEntry() async {
     try {
@@ -250,10 +259,17 @@ class _JournalEntryState extends State<JournalEntry>
         if (mounted) setState(() => _isLoading = false);
         return;
       }
-      final existing = await _service.getTodayEntry(jwt);
+      final listed = await _service.getTodayEntry(jwt);
+      model.JournalEntry? detail;
+      if (listed?.journalEntryId != null) {
+        detail = await _service.getEntryById(listed!.journalEntryId!, jwt);
+      }
+      // Prefer the detail response (has photoSignedUrl); fall back to the
+      // list shape if the detail GET 404'd or returned null.
+      final source = detail ?? listed;
       if (!mounted) return;
       setState(() {
-        if (existing != null) _prefillFrom(existing);
+        if (source != null) _prefillFrom(source);
         _isLoading = false;
       });
     } catch (_) {
@@ -644,14 +660,26 @@ class _JournalEntryState extends State<JournalEntry>
                         : Image.network(
                             _existingPhotoUrl!,
                             fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) => Container(
-                              color: _inputFill,
-                              alignment: Alignment.center,
-                              child: const Icon(
-                                Icons.broken_image,
-                                color: Colors.white38,
-                              ),
-                            ),
+                            // If the server-provided signed URL can't
+                            // be fetched (orphan PhotoURI, expired URL,
+                            // network issue, etc.), drop the URL from
+                            // local state so the next build collapses
+                            // back to the "Add Photo" pill — one-tap
+                            // recovery instead of a stuck broken-image
+                            // icon. Defer the setState past the current
+                            // build via post-frame callback so we're
+                            // not mutating state during build. The
+                            // server-side reference stays; first new
+                            // pick will overwrite it via SetPhoto.
+                            errorBuilder: (_, __, ___) {
+                              WidgetsBinding.instance
+                                  .addPostFrameCallback((_) {
+                                if (mounted && _existingPhotoUrl != null) {
+                                  setState(() => _existingPhotoUrl = null);
+                                }
+                              });
+                              return const SizedBox.shrink();
+                            },
                           ),
                   ),
                 ),
