@@ -43,13 +43,22 @@ class JournalEntry extends StatefulWidget {
   State<JournalEntry> createState() => _JournalEntryState();
 }
 
-class _JournalEntryState extends State<JournalEntry> {
+class _JournalEntryState extends State<JournalEntry>
+    with WidgetsBindingObserver {
   // Visual tokens — mirror UserSettings.
   static const Color _inputFill = Color(0xFF555555);
 
   final JournalService _service = JournalService();
   final TextEditingController _thoughts = TextEditingController();
   final TextEditingController _weight = TextEditingController();
+  // FocusNodes so we can flush any pending debounced autosave the
+  // moment the user leaves a numeric field. The thoughts field doesn't
+  // need one since dictation/typing already schedules autosave on
+  // every character.
+  final FocusNode _weightFocus = FocusNode();
+  late final Map<String, FocusNode> _measurementFocus = {
+    for (final s in _measurementSpec) s[1]: FocusNode(),
+  };
 
   // Field keys mirror the regi-api `measurements` map. Order here drives
   // render order in the expander.
@@ -70,11 +79,18 @@ class _JournalEntryState extends State<JournalEntry> {
   XFile? _photo;
   Uint8List? _photoBytes;
   // Photo signed URL returned by the GET for today's entry. Shown as a
-  // network image preview when the user hasn't picked a new photo. The
-  // upsert POST does NOT touch photo state; deletion is a separate
-  // PUT/DELETE on /api/journal/{id}/photo (not wired here).
+  // network image preview when the user hasn't picked a new photo.
   String? _existingPhotoUrl;
+  // Server id of today's entry, captured from prefill OR from the first
+  // successful save. Needed to DELETE the photo on × tap when the photo
+  // came from the server, and to upload a freshly-picked photo against
+  // the right row.
+  int? _journalEntryId;
   bool _isSaving = false;
+  // Set true when a save was requested while another was in flight.
+  // Drained at the end of _save so back-to-back mutations don't drop
+  // their last write (e.g. fast photo-pick during an autosave).
+  bool _savePending = false;
   bool _isLoading = true;
   // True while _prefillFrom is writing into controllers, so the
   // controller listeners that fire don't kick off an autosave for
@@ -109,10 +125,14 @@ class _JournalEntryState extends State<JournalEntry> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _thoughts.addListener(_onFormMutated);
     _weight.addListener(_onFormMutated);
-    for (final c in _measurements.values) {
-      c.addListener(_onFormMutated);
+    _weightFocus.addListener(() => _flushOnBlur(_weightFocus));
+    for (final entry in _measurements.entries) {
+      entry.value.addListener(_onFormMutated);
+      _measurementFocus[entry.key]!
+          .addListener(() => _flushOnBlur(_measurementFocus[entry.key]!));
     }
     final cs = context.read<ChatState>();
     cs.setVoiceSink(VoiceSink(
@@ -128,16 +148,43 @@ class _JournalEntryState extends State<JournalEntry> {
     unawaited(_loadTodayEntry());
   }
 
+  /// Fires an immediate save when a numeric field loses focus. Catches
+  /// the "user typed weight, tapped close before the 1.5s debounce
+  /// fired" edge case. No-op if focus is gaining (we only care about
+  /// blur), if we're prefilling, or if there's already a save in flight
+  /// (the in-flight save will pick up the latest controller values).
+  void _flushOnBlur(FocusNode node) {
+    if (node.hasFocus || _isPrefilling) return;
+    if (_autosaveTimer?.isActive == true) {
+      _saveNow();
+    }
+  }
+
+  /// Re-fetch today's entry when the app returns to the foreground —
+  /// catches the cross-device case where another device saved while
+  /// the phone was backgrounded. Silent on failure.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      unawaited(_loadTodayEntry());
+    }
+  }
+
   /// Called by ChatScreen with the final transcript from a PTT hold.
   /// If the utterance is a save command, fire an immediate save (don't
   /// append it to Thoughts — the user wouldn't want their command word
   /// shoved into their journal). Otherwise append + schedule autosave.
+  ///
+  /// In all cases, defensively drop focus from any TextField afterward.
+  /// PTT writing to a controller can leave a TextField in a state where
+  /// subsequent taps elsewhere seem ignored ("PTT stole focus") — a
+  /// proactive unfocus restores normal tap behavior across the UI.
   void _onVoiceFinal(String text) {
     if (_isSaveCommand(text)) {
-      // Refresh the prefix so the NEXT dictation starts from current
-      // Thoughts (didn't get mutated by this command).
       _thoughtsPrefix = _thoughts.text;
       _saveNow();
+      _toast('Saved.');
+      FocusManager.instance.primaryFocus?.unfocus();
       return;
     }
     final combined = _thoughtsPrefix.isEmpty
@@ -145,6 +192,7 @@ class _JournalEntryState extends State<JournalEntry> {
         : '$_thoughtsPrefix${_separatorAfter(_thoughtsPrefix)}$text';
     _setThoughtsText(combined);
     _thoughtsPrefix = combined;
+    FocusManager.instance.primaryFocus?.unfocus();
     // The controller-text change above also fires _onFormMutated which
     // schedules autosave — no explicit call needed here.
   }
@@ -154,7 +202,7 @@ class _JournalEntryState extends State<JournalEntry> {
     // lowercase. Catches "Save.", "  Save it ", "SAVE NOW" alike.
     final normalized = text
         .trim()
-        .replaceAll(RegExp(r'[.!?,;:]+\$'), '')
+        .replaceAll(RegExp(r'[.!?,;:]+$'), '')
         .replaceAll(RegExp(r'\s+'), ' ')
         .toLowerCase();
     return _saveCommandPhrases.contains(normalized);
@@ -178,10 +226,16 @@ class _JournalEntryState extends State<JournalEntry> {
 
   /// Fires immediately, cancelling any pending debounced save. Used by
   /// photo-pick (we need the entry id ASAP to upload against) and the
-  /// voice "save" command (user explicitly asked).
+  /// voice "save" command (user explicitly asked). If a save is already
+  /// in flight, set [_savePending] so _save will re-run after it
+  /// finishes — never silently drop the request.
   void _saveNow() {
     _autosaveTimer?.cancel();
     _autosaveTimer = null;
+    if (_isSaving) {
+      _savePending = true;
+      return;
+    }
     unawaited(_save());
   }
 
@@ -210,9 +264,11 @@ class _JournalEntryState extends State<JournalEntry> {
   void _prefillFrom(model.JournalEntry e) {
     // Set the prefill flag BEFORE touching any controller so the
     // listener-triggered _onFormMutated calls bail out early and don't
-    // flip _isDirty. Cleared at the end.
+    // schedule an autosave for server-populated values. Cleared at the
+    // end.
     _isPrefilling = true;
     try {
+      _journalEntryId = e.journalEntryId;
       _existingPhotoUrl = e.photoSignedUrl;
       // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse
       // the date portion only. Falls back to today on any parse problem.
@@ -259,12 +315,12 @@ class _JournalEntryState extends State<JournalEntry> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
-    // about to close the http.Client). The 1.5s of latest edits will
-    // be lost if the user closes the overlay mid-debounce. Acceptable
-    // trade-off; if it becomes a real complaint, hook closeOverlay() to
-    // request a flush before the widget tears down.
+    // about to close the http.Client). Field-blur listeners already
+    // flush on focus loss; the remaining loss window is just "user
+    // close-tapped mid-typing without leaving the field."
     _autosaveTimer?.cancel();
     // Clear voice sink so any in-flight PTT release routes back to the
     // chat default and the PTT button hides (unless the user explicitly
@@ -276,8 +332,12 @@ class _JournalEntryState extends State<JournalEntry> {
     }
     _thoughts.dispose();
     _weight.dispose();
+    _weightFocus.dispose();
     for (final c in _measurements.values) {
       c.dispose();
+    }
+    for (final f in _measurementFocus.values) {
+      f.dispose();
     }
     _service.dispose();
     super.dispose();
@@ -314,18 +374,36 @@ class _JournalEntryState extends State<JournalEntry> {
     }
   }
 
-  void _clearPhoto() {
-    // Hides BOTH a freshly-picked photo and the server-side existing
-    // photo from the local view. Server-side deletion of the existing
-    // photo is a separate DELETE on /api/journal/{id}/photo (not wired
-    // here); for now × is "remove from this view," save behaviour is
-    // unaffected since upsert doesn't touch photo state.
+  Future<void> _clearPhoto() async {
+    // Snapshot whether we need a server-side delete BEFORE we wipe local
+    // state. Three cases:
+    //   1. Local-only (just picked, never saved) → no server call.
+    //   2. Server-backed (came from prefill or completed upload) AND we
+    //      know the entry id → fire DELETE /journal/{id}/photo.
+    //   3. Server-backed but no entry id yet → defensively wipe local
+    //      only (shouldn't happen — photo URL only comes with an entry).
+    final hadServerPhoto = _existingPhotoUrl != null;
+    final entryId = _journalEntryId;
     setState(() {
       _photo = null;
       _photoBytes = null;
       _existingPhotoUrl = null;
     });
-    _scheduleAutosave();
+    if (!hadServerPhoto || entryId == null) return;
+    try {
+      final jwt = await context.read<AuthService>().getAccessToken();
+      if (jwt == null) {
+        if (mounted) _toast('Not authenticated.');
+        return;
+      }
+      await _service.deletePhoto(entryId, jwt);
+    } on JournalException catch (e) {
+      if (mounted) {
+        _toast('Photo delete failed: HTTP ${e.statusCode} ${e.body}');
+      }
+    } catch (e) {
+      if (mounted) _toast('Photo delete failed: $e');
+    }
   }
 
   // ───────── Date ─────────
@@ -384,15 +462,26 @@ class _JournalEntryState extends State<JournalEntry> {
 
     try {
       final saved = await _service.upsertEntry(entry, jwt);
+      _journalEntryId = saved.journalEntryId;
       if (_photo != null &&
           _photoBytes != null &&
           saved.journalEntryId != null) {
-        await _service.uploadPhoto(
+        final updated = await _service.uploadPhoto(
           saved.journalEntryId!,
           _photoBytes!,
           _photo!.name,
           jwt,
         );
+        // Photo is now persisted; promote it from the local "freshly
+        // picked" slot to the server-backed slot so a subsequent ×
+        // tap fires the DELETE path instead of just hiding bytes.
+        if (mounted) {
+          setState(() {
+            _photo = null;
+            _photoBytes = null;
+            _existingPhotoUrl = updated.photoSignedUrl;
+          });
+        }
       }
       if (!mounted) return;
       setState(() => _isSaving = false);
@@ -406,6 +495,11 @@ class _JournalEntryState extends State<JournalEntry> {
       if (!mounted) return;
       setState(() => _isSaving = false);
       _toast('Save failed: $e');
+    }
+    // Drain pending — another save was requested while we were running.
+    if (_savePending && mounted) {
+      _savePending = false;
+      unawaited(_save());
     }
   }
 
@@ -698,6 +792,7 @@ class _JournalEntryState extends State<JournalEntry> {
             Expanded(
               child: TextField(
                 controller: _weight,
+                focusNode: _weightFocus,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
                 style: const TextStyle(color: Colors.white),
@@ -773,13 +868,17 @@ class _JournalEntryState extends State<JournalEntry> {
         ),
         children: [
           for (final s in _measurementSpec)
-            _measurementRow(s[0], _measurements[s[1]]!),
+            _measurementRow(s[0], _measurements[s[1]]!, _measurementFocus[s[1]]!),
         ],
       ),
     );
   }
 
-  Widget _measurementRow(String label, TextEditingController c) {
+  Widget _measurementRow(
+    String label,
+    TextEditingController c,
+    FocusNode f,
+  ) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
@@ -791,6 +890,7 @@ class _JournalEntryState extends State<JournalEntry> {
           Expanded(
             child: TextField(
               controller: c,
+              focusNode: f,
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
               style: const TextStyle(color: Colors.white),

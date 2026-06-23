@@ -662,28 +662,38 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!state.isTalkActive) return;
     state.setTalkActive(false);
 
+    // Single exit-cleanup: ALWAYS clear listening + drop primary focus
+    // when this handler returns, no matter which branch. The unfocus is
+    // defensive against the "PTT stole focus" symptom — if any TextField
+    // picked up focus during the hold (e.g. via controller-text write),
+    // releasing it here restores normal tap routing across the UI.
+    void finish() {
+      if (!mounted) return;
+      state.setListening(false);
+      FocusManager.instance.primaryFocus?.unfocus();
+    }
+
     Uint8List? bytes;
     try {
       bytes = await _recorder.stop();
     } catch (e) {
-      if (!mounted) return;
-      state.setListening(false);
       _toast('mic stop threw: $e');
+      finish();
       return;
     }
 
     if (bytes == null || bytes.isEmpty) {
-      if (mounted) state.setListening(false);
       if (state.voiceSink == null) state.clearCurrentInput();
       _toast('recorder produced 0 bytes (likely web pcm16 unsupported '
           'or zero-length press)');
+      finish();
       return;
     }
 
     final jwt = await auth.getAccessToken();
     if (jwt == null) {
-      if (mounted) state.setListening(false);
       _toast('stt: not authenticated');
+      finish();
       return;
     }
 
@@ -695,27 +705,25 @@ class _ChatScreenState extends State<ChatScreen> {
         jwt: jwt,
       );
     } on SpeechError catch (e) {
-      if (!mounted) return;
-      state.setListening(false);
       if (state.voiceSink == null) state.clearCurrentInput();
       _toast(e.httpStatus == 422
           ? "didn't catch that — try again"
           : 'stt ${e.code}: ${e.detail}');
+      finish();
       return;
     } catch (e) {
-      if (!mounted) return;
-      state.setListening(false);
       if (state.voiceSink == null) state.clearCurrentInput();
       _toast('stt threw: $e');
+      finish();
       return;
     }
 
     if (!mounted) return;
-    state.setListening(false);
     final text = result.transcript.trim();
     if (text.isEmpty) {
       if (state.voiceSink == null) state.clearCurrentInput();
       _toast('stt returned empty transcript (${result.durationSeconds}s audio)');
+      finish();
       return;
     }
 
@@ -729,6 +737,7 @@ class _ChatScreenState extends State<ChatScreen> {
       state.clearCurrentInput();
       await _sendMessage(text);
     }
+    finish();
   }
 
   // Floats a short debug/feedback message above whatever is on screen —
@@ -861,36 +870,33 @@ class _ChatScreenState extends State<ChatScreen> {
         // Title shrinks to the overlay's name while an overlay is open —
         // on mobile we don't have horizontal room for branding + a long
         // overlay name + the AppBar actions. Branding returns once the
-        // overlay closes.
-        title: state.activeOverlay != null
-            ? Text(_overlayDisplayName(state.activeOverlay!))
-            : Row(
-                children: [
-                  const Text('RegiMenu'),
-                  const SizedBox(width: 12),
-                  // Mic icon goes amber ONLY when the recognizer is
-                  // actually listening. The ~100-200ms delay between
-                  // press and amber is the user's cue that the recognizer
-                  // is ready and they can start talking.
-                  Icon(
-                    Icons.mic,
-                    size: 18,
-                    color: state.isListening
-                        ? const Color(0xFFF2B33D)
-                        : Colors.white24,
-                  ),
-                  const SizedBox(width: 8),
-                  if (state.isListening)
-                    const MicLevelBars(
-                      barCount: 11,
-                      color: Color(0xFFF2B33D),
-                      minHeight: 4,
-                      maxHeight: 26,
-                      barWidth: 2,
-                      spacing: 2,
-                    ),
-                ],
+        // overlay closes. Mic-status (amber mic + level bars) shows in
+        // BOTH layouts so the user always has a "is it listening" cue.
+        title: Row(
+          children: [
+            Text(state.activeOverlay != null
+                ? _overlayDisplayName(state.activeOverlay!)
+                : 'RegiMenu'),
+            const SizedBox(width: 12),
+            Icon(
+              Icons.mic,
+              size: 18,
+              color: state.isListening
+                  ? const Color(0xFFF2B33D)
+                  : Colors.white24,
+            ),
+            const SizedBox(width: 8),
+            if (state.isListening)
+              const MicLevelBars(
+                barCount: 11,
+                color: Color(0xFFF2B33D),
+                minHeight: 4,
+                maxHeight: 26,
+                barWidth: 2,
+                spacing: 2,
               ),
+          ],
+        ),
         actions: [
           // Red × Close is the only colored AppBar action — it sits at
           // the right edge whenever an overlay is open. Overlays
