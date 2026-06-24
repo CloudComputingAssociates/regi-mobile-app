@@ -19,6 +19,11 @@ class ChatState extends ChangeNotifier {
   // close independently. See CLAUDE.md for the overlay vs bloom split.
   String? _activeOverlay;
   VoiceSink? _voiceSink;
+  // Increments on every open/close. ChatScreen uses this in a Key so
+  // the overlay-area subtree is force-rebuilt on every transition,
+  // defending against Flutter Web's conditional-render wedge where a
+  // stale widget stays painted after activeOverlay flips to null.
+  int _overlayEpoch = 0;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -30,6 +35,7 @@ class ChatState extends ChangeNotifier {
   bool get ttsEnabled => _ttsEnabled;
   String? get activeBloom => _activeBloom;
   String? get activeOverlay => _activeOverlay;
+  int get overlayEpoch => _overlayEpoch;
   VoiceSink? get voiceSink => _voiceSink;
 
   /// Registers (or clears) the routing target for the global PTT mic.
@@ -85,25 +91,21 @@ class ChatState extends ChangeNotifier {
   /// Replaces the chat output area while active. Independent from any
   /// bloom that may be on top.
   void openOverlay(String key) {
-    debugPrint('[ChatState.openOverlay] called key=$key, before=$_activeOverlay');
-    if (_activeOverlay == key) {
-      debugPrint('[ChatState.openOverlay] early-return (already $key)');
-      return;
-    }
+    debugPrint('[ChatState.openOverlay] key=$key, before=$_activeOverlay');
     _activeOverlay = key;
+    _overlayEpoch++;
     notifyListeners();
-    debugPrint('[ChatState.openOverlay] done, after=$_activeOverlay');
   }
 
+  /// Always notifies, always bumps the epoch — even if state didn't
+  /// change. Defensive against rebuilds being silently dropped or the
+  /// widget tree wedging on a stale render.
   void closeOverlay() {
-    debugPrint('[ChatState.closeOverlay] called, before=$_activeOverlay');
-    if (_activeOverlay == null) {
-      debugPrint('[ChatState.closeOverlay] early-return (already null)');
-      return;
-    }
+    debugPrint('[ChatState.closeOverlay] before=$_activeOverlay');
     _activeOverlay = null;
+    _voiceSink = null;
+    _overlayEpoch++;
     notifyListeners();
-    debugPrint('[ChatState.closeOverlay] done, after=$_activeOverlay');
   }
 
   void setCurrentInput(String value) {

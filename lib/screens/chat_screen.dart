@@ -912,14 +912,20 @@ class _ChatScreenState extends State<ChatScreen> {
           // autosave, so there is no Save icon. The chat-only Clear
           // action hides while an overlay is active because we don't
           // wipe form state out from under autosave.
-          if (state.activeOverlay != null)
+          // X stays visible whenever ANY overlay-ish state is set: the
+          // overlay name, OR a voice sink (which only overlays register).
+          // This means even if `activeOverlay` somehow got cleared while
+          // the UI still shows the panel (the symptom we were chasing),
+          // the X is still there and the user can still escape.
+          if (state.activeOverlay != null || state.voiceSink != null)
             IconButton(
               icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
-              tooltip: 'Close ${state.activeOverlay}',
+              tooltip: 'Close',
               onPressed: () {
                 debugPrint('[close-overlay] X tapped, activeOverlay=${state.activeOverlay}');
-                context.read<ChatState>().closeOverlay();
-                debugPrint('[close-overlay] after closeOverlay, activeOverlay=${context.read<ChatState>().activeOverlay}');
+                final cs = context.read<ChatState>();
+                cs.closeOverlay(); // now always notifies + bumps epoch
+                debugPrint('[close-overlay] after, activeOverlay=${cs.activeOverlay} epoch=${cs.overlayEpoch}');
               },
             ),
           // Settings is intentionally NOT in the AppBar — the
@@ -943,9 +949,18 @@ class _ChatScreenState extends State<ChatScreen> {
           Column(
             children: [
               Expanded(
-                child: state.activeOverlay != null
-                    ? _renderOverlay(state.activeOverlay!)
-                    : const ChatOutput(),
+                // KeyedSubtree on overlayEpoch — every open/close bumps
+                // the epoch and forces this subtree to remount, which
+                // defensively kills the "stale widget still painted
+                // after activeOverlay flipped to null" wedge we were
+                // chasing. The conditional inside the key picks which
+                // widget to render based on the current activeOverlay.
+                child: KeyedSubtree(
+                  key: ValueKey('overlay-epoch-${state.overlayEpoch}'),
+                  child: state.activeOverlay != null
+                      ? _renderOverlay(state.activeOverlay!)
+                      : const ChatOutput(),
+                ),
               ),
               ChatInput(
                 onSend: _sendMessage,
