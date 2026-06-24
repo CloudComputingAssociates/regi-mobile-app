@@ -762,11 +762,11 @@ class _ChatScreenState extends State<ChatScreen> {
   String _overlayDisplayName(String key) {
     switch (key) {
       case 'Journal':
-        return '(Journal)';
+        return 'Journal Entry';
       case 'AddFood':
-        return '(Add Food)';
+        return 'Add Food';
       default:
-        return '($key)';
+        return key;
     }
   }
 
@@ -907,14 +907,15 @@ class _ChatScreenState extends State<ChatScreen> {
             IconButton(
               icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
               tooltip: 'Close ${state.activeOverlay}',
-              onPressed: () => context.read<ChatState>().closeOverlay(),
+              onPressed: () {
+                debugPrint('[close-overlay] X tapped, activeOverlay=${state.activeOverlay}');
+                context.read<ChatState>().closeOverlay();
+                debugPrint('[close-overlay] after closeOverlay, activeOverlay=${context.read<ChatState>().activeOverlay}');
+              },
             ),
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () =>
-                context.read<ChatState>().openBloom('UserSettings'),
-          ),
+          // Settings is intentionally NOT in the AppBar — the
+          // UserSettings bloom opens only via a chat/voice command
+          // (the command gate dispatches openBloom('UserSettings')).
           if (state.activeOverlay == null)
             IconButton(
               icon: const Icon(Icons.clear_all),

@@ -39,12 +39,7 @@ class _ChatOutputState extends State<ChatOutput> {
     _scheduleAutoScroll();
 
     if (messages.isEmpty) {
-      return const Center(
-        child: Text(
-          'Press & hold to talk',
-          style: TextStyle(color: Colors.white54),
-        ),
-      );
+      return const SizedBox.shrink();
     }
 
     return ListView.builder(

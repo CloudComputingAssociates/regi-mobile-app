@@ -653,34 +653,34 @@ class _JournalEntryState extends State<JournalEntry>
               clipBehavior: Clip.none,
               children: [
                 Positioned.fill(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(8),
-                    child: _photoBytes != null
-                        ? Image.memory(_photoBytes!, fit: BoxFit.cover)
-                        : Image.network(
-                            _existingPhotoUrl!,
-                            fit: BoxFit.cover,
-                            // If the server-provided signed URL can't
-                            // be fetched (orphan PhotoURI, expired URL,
-                            // network issue, etc.), drop the URL from
-                            // local state so the next build collapses
-                            // back to the "Add Photo" pill — one-tap
-                            // recovery instead of a stuck broken-image
-                            // icon. Defer the setState past the current
-                            // build via post-frame callback so we're
-                            // not mutating state during build. The
-                            // server-side reference stays; first new
-                            // pick will overwrite it via SetPhoto.
-                            errorBuilder: (_, __, ___) {
-                              WidgetsBinding.instance
-                                  .addPostFrameCallback((_) {
-                                if (mounted && _existingPhotoUrl != null) {
-                                  setState(() => _existingPhotoUrl = null);
-                                }
-                              });
-                              return const SizedBox.shrink();
-                            },
-                          ),
+                  // IgnorePointer wraps the image so any HTML platform-
+                  // view created by Flutter Web's image renderer can't
+                  // steal pointer events from surrounding UI (AppBar X,
+                  // hamburger, etc.). The user's bytes are display-only
+                  // — they don't need to receive taps; only the floating
+                  // × delete button (rendered above this) needs taps.
+                  child: IgnorePointer(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: _photoBytes != null
+                          ? Image.memory(_photoBytes!, fit: BoxFit.cover)
+                          : Image.network(
+                              _existingPhotoUrl!,
+                              key: ValueKey(_existingPhotoUrl),
+                              fit: BoxFit.cover,
+                              // Orphan/expired URL fallback → drop the URL
+                              // locally, next build shows Add Photo pill.
+                              errorBuilder: (_, __, ___) {
+                                WidgetsBinding.instance
+                                    .addPostFrameCallback((_) {
+                                  if (mounted && _existingPhotoUrl != null) {
+                                    setState(() => _existingPhotoUrl = null);
+                                  }
+                                });
+                                return const SizedBox.shrink();
+                              },
+                            ),
+                    ),
                   ),
                 ),
                 Positioned(
