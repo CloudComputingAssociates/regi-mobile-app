@@ -25,9 +25,9 @@ import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
 import '../widgets/blooms/user_settings.dart';
+import '../widgets/overlays/app_settings.dart';
+import '../widgets/overlays/journal_entry.dart';
 import '../widgets/ptt_button.dart';
-import 'journal_route.dart';
-import 'settings_route.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
@@ -45,13 +45,6 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
-  // Nested Navigator that owns the swappable area above ChatInput. Route
-  // 0 ('/') is ChatOutput; left-nav overlays (Journal, AddFood, …) will
-  // be pushed onto this stack instead of swapped in via a conditional
-  // ternary. Chat-input lives OUTSIDE this Navigator so it remains
-  // mounted/active regardless of which inner route is showing.
-  final GlobalKey<NavigatorState> _innerNavKey = GlobalKey<NavigatorState>();
-
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
   final SettingsService _settings = SettingsService();
@@ -774,6 +767,47 @@ class _ChatScreenState extends State<ChatScreen> {
     context.read<ChatState>().toggleTts();
   }
 
+  /// Opaque overlay panel laid over ChatOutput. The Material-backed
+  /// header bar lets InkWell/IconButton register taps cleanly without
+  /// scrounging for a Material ancestor. The opaque dark Container
+  /// background is what stops taps from falling through to ChatOutput
+  /// underneath — do not make it transparent. The leading back arrow
+  /// unfocuses first, then closes the overlay via ChatState so any
+  /// disposed-field FocusNode can't leave a dangling primary focus.
+  Widget _buildOverlayPanel(String title, Widget child) {
+    return Container(
+      color: const Color(0xFF1B1B1B),
+      child: Column(
+        children: [
+          Material(
+            color: const Color(0xFF1B1B1B),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Colors.white),
+                  tooltip: 'Back',
+                  onPressed: () {
+                    FocusManager.instance.primaryFocus?.unfocus();
+                    context.read<ChatState>().closeOverlay();
+                  },
+                ),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Expanded(child: child),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
@@ -821,9 +855,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  // TODO: AddFoodRoute — once we have a route page
-                  // (mirror of JournalRoute), push it onto the inner
-                  // navigator the same way Enter Journal does below.
+                  // TODO: openOverlay('AddFood') once the AddFood
+                  // overlay widget exists — same dispatch as Enter
+                  // Journal below.
                 },
               ),
               ListTile(
@@ -834,14 +868,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  // Push onto the inner Navigator so chat-input
-                  // stays mounted underneath. Close comes from the
-                  // route's own AppBar × (see JournalRoute).
-                  _innerNavKey.currentState?.push(
-                    MaterialPageRoute(
-                      builder: (_) => const JournalRoute(),
-                    ),
-                  );
+                  context.read<ChatState>().openOverlay('Journal');
                 },
               ),
             ],
@@ -880,14 +907,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          // Overlay close affordance lives on the pushed route's own
-          // AppBar (see JournalRoute) — pops via Navigator. No outer
-          // AppBar close button needed.
-          // Settings is intentionally NOT in the AppBar — the
-          // UserSettings bloom opens only via a chat/voice command
-          // (the command gate dispatches openBloom('UserSettings')).
-          // Clear renders unconditionally — chat is always route 0
-          // beneath any pushed overlay, and Clear acts on chat.
+          // Overlays carry their own close affordance (the back
+          // arrow in the overlay panel's header bar) — no outer
+          // AppBar × needed. Clear renders unconditionally; it acts
+          // on the chat conversation which is always mounted
+          // beneath whatever overlay is open.
           IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: 'Clear',
@@ -896,13 +920,8 @@ class _ChatScreenState extends State<ChatScreen> {
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: 'App Settings',
-            onPressed: () {
-              _innerNavKey.currentState?.push(
-                MaterialPageRoute(
-                  builder: (_) => const SettingsRoute(),
-                ),
-              );
-            },
+            onPressed: () =>
+                context.read<ChatState>().openOverlay('Settings'),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -916,22 +935,35 @@ class _ChatScreenState extends State<ChatScreen> {
           Column(
             children: [
               Expanded(
-                // Nested Navigator owns the swappable area. Route 0 is
-                // ChatOutput; left-nav overlays push routes here in
-                // later steps. Chat-input below is OUTSIDE this
-                // Navigator so it stays mounted across route changes.
-                child: Navigator(
-                  key: _innerNavKey,
-                  onGenerateRoute: (settings) {
-                    if (settings.name == '/' || settings.name == null) {
-                      return MaterialPageRoute(
-                        settings: settings,
-                        builder: (_) => const ChatOutput(),
-                      );
-                    }
-                    // Other routes wired in later steps.
-                    return null;
-                  },
+                // ChatOutput is the permanent bottom layer — mounted
+                // for the app's lifetime, never swapped, never
+                // offstaged. Left-nav overlays (Journal, Settings, …)
+                // are opaque panels laid on top via the conditional
+                // children below; closing an overlay simply unmounts
+                // its panel and ChatOutput becomes visible again
+                // without re-mount, re-subscribe, or rebuild from a
+                // navigation event. ChatInput sits OUTSIDE this Stack
+                // (sibling below the Expanded) so it's never covered
+                // by an overlay and never disturbed by overlay
+                // activity.
+                child: Stack(
+                  children: [
+                    const ChatOutput(),
+                    if (state.activeOverlay == 'Journal')
+                      Positioned.fill(
+                        child: _buildOverlayPanel(
+                          'Journal Entry',
+                          const JournalEntry(),
+                        ),
+                      ),
+                    if (state.activeOverlay == 'Settings')
+                      Positioned.fill(
+                        child: _buildOverlayPanel(
+                          'Settings',
+                          const AppSettings(),
+                        ),
+                      ),
+                  ],
                 ),
               ),
               ChatInput(

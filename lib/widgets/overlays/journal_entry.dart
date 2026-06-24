@@ -996,16 +996,12 @@ class _JournalEntryState extends State<JournalEntry>
 
   /// Fullscreen-ish dialog displaying the photo at full size with a
   /// floating red × in the top-right to dismiss. Used for both
-  /// freshly-picked and server-loaded photo bytes.
-  ///
-  /// `useRootNavigator: false` is critical — it pushes onto the inner
-  /// (nested) Navigator that JournalRoute is on, so if the user closes
-  /// the Journal route while this dialog is open, the dialog pops with
-  /// it instead of surviving as an orphaned barrier over chat-input.
+  /// freshly-picked and server-loaded photo bytes. Lives on the root
+  /// Navigator (default) — independent of the overlay panel, the
+  /// same way blooms are.
   void _openPhotoZoom(Uint8List bytes) {
     showDialog<void>(
       context: context,
-      useRootNavigator: false,
       barrierColor: Colors.black87,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
@@ -1063,7 +1059,6 @@ class _JournalEntryState extends State<JournalEntry>
   Future<void> _openAddPhotoBloom() async {
     final source = await showDialog<ImageSource>(
       context: context,
-      useRootNavigator: false,
       barrierColor: Colors.black54,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,

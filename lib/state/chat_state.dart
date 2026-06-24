@@ -14,6 +14,7 @@ class ChatState extends ChangeNotifier {
   String? _sessionId;
   String _currentInput = '';
   bool _ttsEnabled = true;
+  String? _activeOverlay;
   String? _activeBloom;
   VoiceSink? _voiceSink;
   VoiceMode _voiceMode = VoiceMode.pushToTalk;
@@ -26,6 +27,7 @@ class ChatState extends ChangeNotifier {
   String? get sessionId => _sessionId;
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
+  String? get activeOverlay => _activeOverlay;
   String? get activeBloom => _activeBloom;
   VoiceSink? get voiceSink => _voiceSink;
   VoiceMode get voiceMode => _voiceMode;
@@ -71,6 +73,17 @@ class ChatState extends ChangeNotifier {
   void setListening(bool listening) {
     if (_isListening == listening) return;
     _isListening = listening;
+    notifyListeners();
+  }
+
+  void openOverlay(String key) {
+    _activeOverlay = key;
+    notifyListeners();
+  }
+
+  void closeOverlay() {
+    if (_activeOverlay == null) return;
+    _activeOverlay = null;
     notifyListeners();
   }
 
