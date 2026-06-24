@@ -272,6 +272,21 @@ class _JournalEntryState extends State<JournalEntry>
       // list shape if the detail GET 404'd or returned null.
       final source = detail ?? listed;
       if (!mounted) return;
+      // Don't clobber an in-flight user edit. The classic failure: user
+      // taps Add Photo → Camera, native camera launches → app
+      // backgrounds → app foregrounds when capture done →
+      // didChangeAppLifecycleState(resumed) fires → THIS method runs.
+      // While its GET is in flight, the photo picker's future also
+      // resolves and _pickPhoto sets _photo/_photoBytes and kicks off
+      // _save. If we now naively call _resetFormFields() (no server
+      // entry yet for today), we wipe _photo before _save's photo
+      // upload guard can read it → entry posts, photo silently never
+      // uploads. Skip the apply when local user-state is pending; the
+      // next quiet moment can re-fetch.
+      if (_photo != null || _isSaving) {
+        setState(() => _isLoading = false);
+        return;
+      }
       setState(() {
         if (source != null) {
           _prefillFrom(source);
