@@ -930,9 +930,16 @@ class _ChatScreenState extends State<ChatScreen> {
               tooltip: 'Close ${state.activeOverlay}',
               onPressed: () {
                 final cs = context.read<ChatState>();
+                // Pop any open dialog routes first (e.g. the photo zoom
+                // dialog). Otherwise a leftover dialog's dark barrier
+                // sits on top of chat-input after the overlay closes
+                // and steals all taps, leaving only edge elements like
+                // the Mute icon visible/clickable. popUntil stops at
+                // the first non-PopupRoute so we don't accidentally
+                // pop back to login.
+                Navigator.of(context)
+                    .popUntil((route) => route is! PopupRoute);
                 cs.closeOverlay();
-                // setState fallback in case Provider notify doesn't
-                // reach us through some route-pop edge case.
                 if (mounted) setState(() {});
               },
             ),

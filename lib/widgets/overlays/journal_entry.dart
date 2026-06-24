@@ -430,6 +430,16 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
+    // If the photo zoom dialog (or any other locally-opened modal) is
+    // still on top when the overlay closes, dismiss it. Otherwise a
+    // leftover dialog's dark barrier persists over chat-input after
+    // close, blocking taps.
+    try {
+      final nav = Navigator.of(context, rootNavigator: true);
+      nav.popUntil((route) => route is! PopupRoute);
+    } catch (_) {
+      // context may already be detached during teardown.
+    }
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
@@ -706,16 +716,20 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   Widget _deleteEntryButton() {
-    final canDelete = _journalEntryId != null && !_isSaving;
+    // Always available unless a save is mid-flight. Even with no
+    // server-side entry, the button wipes the local form (useful if
+    // the user typed but autosave hadn't fired yet) and toasts the
+    // confirmation — semantics match the label "Clear Entry."
+    final canClear = !_isSaving;
     return Center(
       child: TextButton(
-        onPressed: canDelete ? _deleteEntry : null,
+        onPressed: canClear ? _clearEntry : null,
         style: TextButton.styleFrom(
           foregroundColor: const Color(0xFFFF5F57),
           disabledForegroundColor: Colors.white24,
         ),
         child: const Text(
-          'Delete Entry',
+          'Clear Entry',
           style: TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.w600,
@@ -725,39 +739,57 @@ class _JournalEntryState extends State<JournalEntry>
     );
   }
 
-  /// Deletes today's entry server-side (best-effort photo cleanup
-  /// happens server-side per the API contract) and closes the overlay.
-  /// No confirmation — per user request. Fires immediately.
-  Future<void> _deleteEntry() async {
+  /// Wipes the local form AND (if an entry exists server-side) deletes
+  /// the row. Stays in the overlay so the user can start a fresh entry
+  /// for the same day. Toasts a confirmation. No modal confirm — per
+  /// user request, the action is one-tap.
+  Future<void> _clearEntry() async {
+    if (_isSaving) return;
+    final dateLabel =
+        '${_months[_entryDate.month - 1]} ${_entryDate.day}';
     final id = _journalEntryId;
-    if (id == null) return;
-    final auth = context.read<AuthService>();
-    final cs = context.read<ChatState>();
-    setState(() => _isSaving = true);
+
+    // Cancel any pending autosave so we don't immediately recreate
+    // an entry we're about to delete.
+    _autosaveTimer?.cancel();
+    _autosaveTimer = null;
+
+    // Always reset the local form. Only flip _isSaving when we have a
+    // server call to make, so the button stays enabled in the no-server
+    // case (which is instantaneous).
+    setState(() {
+      _resetFormFields();
+      _isSaving = id != null;
+    });
+
+    if (id == null) {
+      _toast('Journal for $dateLabel cleared.');
+      return;
+    }
+
     try {
-      final jwt = await auth.getAccessToken();
+      final jwt = await context.read<AuthService>().getAccessToken();
       if (jwt == null) {
         if (!mounted) return;
         setState(() => _isSaving = false);
         _toast('Not authenticated.');
         return;
       }
-      // Cancel any pending autosave so we don't immediately re-create
-      // the entry we just deleted.
-      _autosaveTimer?.cancel();
-      _autosaveTimer = null;
       await _service.deleteEntry(id, jwt);
       if (!mounted) return;
-      cs.closeOverlay();
-      if (mounted) setState(() {});
+      setState(() {
+        _journalEntryId = null;
+        _isSaving = false;
+      });
+      _toast('Journal for $dateLabel cleared.');
     } on JournalException catch (e) {
       if (!mounted) return;
       setState(() => _isSaving = false);
-      _toast('Delete failed: HTTP ${e.statusCode} ${e.body}');
+      _toast('Clear failed: HTTP ${e.statusCode} ${e.body}');
     } catch (e) {
       if (!mounted) return;
       setState(() => _isSaving = false);
-      _toast('Delete failed: $e');
+      _toast('Clear failed: $e');
     }
   }
 
@@ -842,22 +874,13 @@ class _JournalEntryState extends State<JournalEntry>
       children: [
         Row(
           children: [
-            // Trash sits to the LEFT of the label so its position is
-            // identical across every section regardless of label width
-            // (Photo / Reflective Thoughts / etc.) — predictable target.
-            IconButton(
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              iconSize: 20,
-              icon: Icon(
-                Icons.delete_outline,
-                color: hasPhoto ? Colors.white70 : Colors.white24,
-              ),
-              tooltip: 'Delete photo',
-              onPressed: hasPhoto ? _clearPhoto : null,
-            ),
-            const SizedBox(width: 4),
             _sectionTitle('Photo'),
+            const SizedBox(width: 10),
+            _sectionTrash(
+              tooltip: 'Delete photo',
+              enabled: hasPhoto,
+              onTap: _clearPhoto,
+            ),
           ],
         ),
         if (!hasPhoto)
@@ -1052,21 +1075,13 @@ class _JournalEntryState extends State<JournalEntry>
       children: [
         Row(
           children: [
-            // Trash sits to the LEFT of the label so its position is
-            // identical across every section regardless of label width.
-            IconButton(
-              padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-              iconSize: 20,
-              icon: Icon(
-                Icons.delete_outline,
-                color: hasText ? Colors.white70 : Colors.white24,
-              ),
-              tooltip: 'Clear thoughts',
-              onPressed: hasText ? _clearThoughts : null,
-            ),
-            const SizedBox(width: 4),
             _sectionTitle('Reflective Thoughts'),
+            const SizedBox(width: 10),
+            _sectionTrash(
+              tooltip: 'Clear thoughts',
+              enabled: hasText,
+              onTap: _clearThoughts,
+            ),
           ],
         ),
         TextField(
@@ -1136,11 +1151,55 @@ class _JournalEntryState extends State<JournalEntry>
     _scheduleAutosave();
   }
 
+  void _clearWeight() {
+    _weight.clear();
+    _scheduleAutosave();
+  }
+
+  void _clearMeasurements() {
+    for (final c in _measurements.values) {
+      c.clear();
+    }
+    _scheduleAutosave();
+  }
+
+  /// Trash IconButton used next to every section label. Greys when
+  /// there's nothing to clear, brightens when there is. 32x32 hit area,
+  /// 20px glyph.
+  Widget _sectionTrash({
+    required String tooltip,
+    required bool enabled,
+    required VoidCallback onTap,
+  }) {
+    return IconButton(
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+      iconSize: 20,
+      icon: Icon(
+        Icons.delete_outline,
+        color: enabled ? Colors.white70 : Colors.white24,
+      ),
+      tooltip: tooltip,
+      onPressed: enabled ? onTap : null,
+    );
+  }
+
   Widget _weightSection() {
+    final hasWeight = _weight.text.trim().isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle('Weight'),
+        Row(
+          children: [
+            _sectionTitle('Weight'),
+            const SizedBox(width: 10),
+            _sectionTrash(
+              tooltip: 'Clear weight',
+              enabled: hasWeight,
+              onTap: _clearWeight,
+            ),
+          ],
+        ),
         Row(
           children: [
             // Fixed width — only ever holds 5 chars at most (e.g. 315.5).
@@ -1208,6 +1267,8 @@ class _JournalEntryState extends State<JournalEntry>
     final stripped = Theme.of(context).copyWith(
       dividerColor: Colors.transparent,
     );
+    final anyValue = _measurements.values
+        .any((c) => c.text.trim().isNotEmpty);
     return Theme(
       data: stripped,
       child: ExpansionTile(
@@ -1226,6 +1287,19 @@ class _JournalEntryState extends State<JournalEntry>
         children: [
           for (final s in _measurementSpec)
             _measurementRow(s[0], _measurements[s[1]]!, _measurementFocus[s[1]]!),
+          // Trash after the expanded measurement fields — only useful
+          // when the expander is open (it's rendered as a child so
+          // ExpansionTile only shows it when expanded). Greys when
+          // there's nothing to clear.
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _sectionTrash(
+              tooltip: 'Clear all measurements',
+              enabled: anyValue,
+              onTap: _clearMeasurements,
+            ),
+          ),
         ],
       ),
     );
