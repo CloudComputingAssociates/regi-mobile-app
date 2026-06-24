@@ -857,16 +857,24 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
-                  Navigator.pop(context);
+                  // Capture cs BEFORE Navigator.pop. After the drawer
+                  // pops, the ListTile's BuildContext is detached and
+                  // Provider lookups + notify propagation through it
+                  // get unreliable — symptom we hit on the second
+                  // open: openOverlay fired but ChatScreen never
+                  // rebuilt. cs is the notifier directly, not the
+                  // context, so it stays valid.
                   final cs = context.read<ChatState>();
-                  // Toggle: if Journal is already open, close it.
-                  // Otherwise open it. Gives the drawer entry the same
-                  // affordance as the red × in the AppBar.
+                  Navigator.pop(context);
                   if (cs.activeOverlay == 'Journal') {
                     cs.closeOverlay();
                   } else {
                     cs.openOverlay('Journal');
                   }
+                  // Belt-and-suspenders: force a rebuild on ChatScreen
+                  // in case Provider's notify is dropped on the way
+                  // out of the popped drawer route.
+                  if (mounted) setState(() {});
                 },
               ),
             ],
