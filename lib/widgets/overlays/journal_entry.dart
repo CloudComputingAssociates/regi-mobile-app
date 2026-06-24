@@ -368,10 +368,23 @@ class _JournalEntryState extends State<JournalEntry>
     // end.
     _isPrefilling = true;
     try {
+      // CLEAR every field first. Otherwise stepping from a day that
+      // had thoughts/weight/measurements to a day where those fields
+      // are null on the server leaves the prior day's values stuck
+      // in the controllers (because the populating branches below are
+      // conditional on the incoming value being non-null).
+      _weight.clear();
+      _thoughts.clear();
+      _thoughtsPrefix = '';
+      for (final c in _measurements.values) {
+        c.clear();
+      }
+      _photo = null;
+      _photoBytes = null;
+      _existingPhotoBytes = null;
+
       _journalEntryId = e.journalEntryId;
       _existingPhotoUrl = e.photoSignedUrl;
-      // Bytes will be re-fetched against the new URL; null until then.
-      _existingPhotoBytes = null;
       // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse
       // the date portion only. Falls back to today on any parse problem.
       final parsed = DateTime.tryParse(e.entryDate);
@@ -829,10 +842,9 @@ class _JournalEntryState extends State<JournalEntry>
       children: [
         Row(
           children: [
-            _sectionTitle('Photo'),
-            const Spacer(),
-            // Trash next to the header — same affordance as the
-            // Thoughts trash. Greys when there's no photo to delete.
+            // Trash sits to the LEFT of the label so its position is
+            // identical across every section regardless of label width
+            // (Photo / Reflective Thoughts / etc.) — predictable target.
             IconButton(
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
@@ -844,6 +856,8 @@ class _JournalEntryState extends State<JournalEntry>
               tooltip: 'Delete photo',
               onPressed: hasPhoto ? _clearPhoto : null,
             ),
+            const SizedBox(width: 4),
+            _sectionTitle('Photo'),
           ],
         ),
         if (!hasPhoto)
@@ -1038,11 +1052,8 @@ class _JournalEntryState extends State<JournalEntry>
       children: [
         Row(
           children: [
-            _sectionTitle('Reflective Thoughts'),
-            const Spacer(),
-            // Trash icon clears the local field immediately (optimistic).
-            // The cleared state is persisted on the next Save. Disabled
-            // when the field is empty so it doesn't draw the eye.
+            // Trash sits to the LEFT of the label so its position is
+            // identical across every section regardless of label width.
             IconButton(
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
@@ -1054,6 +1065,8 @@ class _JournalEntryState extends State<JournalEntry>
               tooltip: 'Clear thoughts',
               onPressed: hasText ? _clearThoughts : null,
             ),
+            const SizedBox(width: 4),
+            _sectionTitle('Reflective Thoughts'),
           ],
         ),
         TextField(
