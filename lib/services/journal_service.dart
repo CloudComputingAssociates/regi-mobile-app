@@ -185,6 +185,29 @@ class JournalService {
     return JournalEntry.fromJson(decoded);
   }
 
+  /// DELETE {base}/journal/{id} — removes the entry plus any attached
+  /// photo (server-side cleanup is best-effort and atomic with the row
+  /// delete per the API contract). Accepts 200 / 204 / 404 as success
+  /// (404 = already gone, treat as idempotent).
+  Future<void> deleteEntry(int journalEntryId, String jwt) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final res = await _client.delete(
+      Uri.parse('$base/journal/$journalEntryId'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+    );
+    if (res.statusCode != 200 &&
+        res.statusCode != 204 &&
+        res.statusCode != 404) {
+      throw JournalException(res.statusCode, res.body);
+    }
+  }
+
   /// DELETE {base}/journal/{id}/photo — removes the stored photo for the
   /// entry without touching any other field. Accepts 200 or 204 (no
   /// content) as success. The caller is responsible for refreshing the

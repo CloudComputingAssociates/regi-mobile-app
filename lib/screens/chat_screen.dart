@@ -808,7 +808,6 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
-    debugPrint('[ChatScreen.build] activeOverlay=${state.activeOverlay} activeBloom=${state.activeBloom}');
     // PTT comes alive when EITHER an overlay/bloom has registered a
     // voice sink (e.g. Journal needs dictation regardless of the user's
     // slider preference), OR the user explicitly chose Voice in the
@@ -925,21 +924,16 @@ class _ChatScreenState extends State<ChatScreen> {
           // This means even if `activeOverlay` somehow got cleared while
           // the UI still shows the panel (the symptom we were chasing),
           // the X is still there and the user can still escape.
-          if (state.activeOverlay != null || state.voiceSink != null)
+          if (state.activeOverlay != null)
             IconButton(
               icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
-              tooltip: 'Close',
+              tooltip: 'Close ${state.activeOverlay}',
               onPressed: () {
-                debugPrint('[close-overlay] X tapped, activeOverlay=${state.activeOverlay}');
                 final cs = context.read<ChatState>();
                 cs.closeOverlay();
-                // Belt-and-suspenders: also force a local setState on
-                // ChatScreen. If Provider's notify isn't reaching us
-                // for some reason (the symptom we keep seeing — close
-                // logs fire but no [ChatScreen.build] follows), this
-                // forces a rebuild directly through the framework.
+                // setState fallback in case Provider notify doesn't
+                // reach us through some route-pop edge case.
                 if (mounted) setState(() {});
-                debugPrint('[close-overlay] after, activeOverlay=${cs.activeOverlay} epoch=${cs.overlayEpoch}');
               },
             ),
           // Settings is intentionally NOT in the AppBar — the
@@ -963,18 +957,9 @@ class _ChatScreenState extends State<ChatScreen> {
           Column(
             children: [
               Expanded(
-                // KeyedSubtree on overlayEpoch — every open/close bumps
-                // the epoch and forces this subtree to remount, which
-                // defensively kills the "stale widget still painted
-                // after activeOverlay flipped to null" wedge we were
-                // chasing. The conditional inside the key picks which
-                // widget to render based on the current activeOverlay.
-                child: KeyedSubtree(
-                  key: ValueKey('overlay-epoch-${state.overlayEpoch}'),
-                  child: state.activeOverlay != null
-                      ? _renderOverlay(state.activeOverlay!)
-                      : const ChatOutput(),
-                ),
+                child: state.activeOverlay != null
+                    ? _renderOverlay(state.activeOverlay!)
+                    : const ChatOutput(),
               ),
               ChatInput(
                 onSend: _sendMessage,

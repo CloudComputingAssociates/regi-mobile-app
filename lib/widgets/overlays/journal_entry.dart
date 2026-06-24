@@ -417,7 +417,6 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
-    debugPrint('[Journal.dispose] starting');
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
@@ -444,7 +443,6 @@ class _JournalEntryState extends State<JournalEntry>
     }
     _service.dispose();
     super.dispose();
-    debugPrint('[Journal.dispose] complete');
   }
 
   void _setThoughtsText(String value) {
@@ -677,34 +675,96 @@ class _JournalEntryState extends State<JournalEntry>
         children: [
           _dateRow(),
           const SizedBox(height: 18),
-          _photoSection(),
-          const SizedBox(height: 18),
           _thoughtsSection(),
           const SizedBox(height: 18),
           _weightSection(),
+          const SizedBox(height: 18),
+          _photoSection(),
           const SizedBox(height: 8),
           _measurementsExpander(),
           // TODO(glp1): when user setting 'Track GLP-1' ships, render a
           // dose field here.
-          // Save lives in the AppBar (green check). Errors come back as
-          // SnackBars via [_toast] so a save failure can't get pushed
-          // off-screen by a scrolled form.
           const SizedBox(height: 24),
+          _deleteEntryButton(),
+          const SizedBox(height: 12),
         ],
       ),
     );
+  }
+
+  Widget _deleteEntryButton() {
+    final canDelete = _journalEntryId != null && !_isSaving;
+    return Center(
+      child: TextButton(
+        onPressed: canDelete ? _deleteEntry : null,
+        style: TextButton.styleFrom(
+          foregroundColor: const Color(0xFFFF5F57),
+          disabledForegroundColor: Colors.white24,
+        ),
+        child: const Text(
+          'Delete Entry',
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Deletes today's entry server-side (best-effort photo cleanup
+  /// happens server-side per the API contract) and closes the overlay.
+  /// No confirmation — per user request. Fires immediately.
+  Future<void> _deleteEntry() async {
+    final id = _journalEntryId;
+    if (id == null) return;
+    final auth = context.read<AuthService>();
+    final cs = context.read<ChatState>();
+    setState(() => _isSaving = true);
+    try {
+      final jwt = await auth.getAccessToken();
+      if (jwt == null) {
+        if (!mounted) return;
+        setState(() => _isSaving = false);
+        _toast('Not authenticated.');
+        return;
+      }
+      // Cancel any pending autosave so we don't immediately re-create
+      // the entry we just deleted.
+      _autosaveTimer?.cancel();
+      _autosaveTimer = null;
+      await _service.deleteEntry(id, jwt);
+      if (!mounted) return;
+      cs.closeOverlay();
+      if (mounted) setState(() {});
+    } on JournalException catch (e) {
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      _toast('Delete failed: HTTP ${e.statusCode} ${e.body}');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isSaving = false);
+      _toast('Delete failed: $e');
+    }
   }
 
   Widget _dateRow() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final canStepForward = _entryDate.isBefore(today);
+    // Both arrows sit at the LEFT of the chip so the chip can grow /
+    // shrink with the label text ("Today (Jun 24)" vs "Jun 24") without
+    // shifting the arrows under the user's finger between taps.
     return Row(
       children: [
-        _sectionTitle('Date'),
-        const SizedBox(width: 12),
         _dateArrow(Icons.chevron_left, true, () => _stepDate(-1)),
         const SizedBox(width: 6),
+        _dateArrow(
+          Icons.chevron_right,
+          canStepForward,
+          canStepForward ? () => _stepDate(1) : null,
+        ),
+        const SizedBox(width: 8),
         InkWell(
           onTap: _pickDate,
           borderRadius: BorderRadius.circular(20),
@@ -730,12 +790,6 @@ class _JournalEntryState extends State<JournalEntry>
               ],
             ),
           ),
-        ),
-        const SizedBox(width: 6),
-        _dateArrow(
-          Icons.chevron_right,
-          canStepForward,
-          canStepForward ? () => _stepDate(1) : null,
         ),
       ],
     );
@@ -773,7 +827,25 @@ class _JournalEntryState extends State<JournalEntry>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle('Photo'),
+        Row(
+          children: [
+            _sectionTitle('Photo'),
+            const Spacer(),
+            // Trash next to the header — same affordance as the
+            // Thoughts trash. Greys when there's no photo to delete.
+            IconButton(
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+              iconSize: 20,
+              icon: Icon(
+                Icons.delete_outline,
+                color: hasPhoto ? Colors.white70 : Colors.white24,
+              ),
+              tooltip: 'Delete photo',
+              onPressed: hasPhoto ? _clearPhoto : null,
+            ),
+          ],
+        ),
         if (!hasPhoto)
           _pillButton(
             icon: Icons.add_a_photo,
@@ -781,69 +853,94 @@ class _JournalEntryState extends State<JournalEntry>
             onTap: _openAddPhotoBloom,
           )
         else
-          SizedBox(
-            width: 140,
-            height: 140,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Positioned.fill(
-                  // IgnorePointer so the image can't capture taps from
-                  // surrounding UI. Image.memory only (no Image.network)
-                  // so Flutter web doesn't spawn an <img> platform view
-                  // that wedges the widget tree on rebuild.
-                  child: IgnorePointer(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: displayBytes != null
-                          ? Image.memory(displayBytes, fit: BoxFit.cover)
-                          : Container(
-                              color: _inputFill,
-                              alignment: Alignment.center,
-                              child: const SizedBox(
-                                width: 24,
-                                height: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white38,
-                                ),
-                              ),
-                            ),
-                    ),
-                  ),
-                ),
-                Positioned(
-                  right: -8,
-                  top: -8,
-                  child: GestureDetector(
-                    onTap: _clearPhoto,
-                    child: Container(
-                      width: 26,
-                      height: 26,
-                      decoration: const BoxDecoration(
-                        color: Color(0xFFFF5F57),
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black54,
-                            blurRadius: 2,
-                            offset: Offset(0, 1),
+          // Tap the thumbnail (or press-and-hold on touch) → zoom dialog
+          // with a red × to close. The thumbnail itself has no × — the
+          // trash next to the section header is the delete affordance.
+          GestureDetector(
+            onTap: displayBytes != null
+                ? () => _openPhotoZoom(displayBytes)
+                : null,
+            onLongPress: displayBytes != null
+                ? () => _openPhotoZoom(displayBytes)
+                : null,
+            child: SizedBox(
+              width: 140,
+              height: 140,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: displayBytes != null
+                    ? Image.memory(displayBytes, fit: BoxFit.cover)
+                    : Container(
+                        color: _inputFill,
+                        alignment: Alignment.center,
+                        child: const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white38,
                           ),
-                        ],
+                        ),
                       ),
-                      alignment: Alignment.center,
-                      child: const Icon(
-                        Icons.close,
-                        size: 16,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
       ],
+    );
+  }
+
+  /// Fullscreen-ish dialog displaying the photo at full size with a
+  /// floating red × in the top-right to dismiss. Used for both
+  /// freshly-picked and server-loaded photo bytes.
+  void _openPhotoZoom(Uint8List bytes) {
+    showDialog<void>(
+      context: context,
+      barrierColor: Colors.black87,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.all(16),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: InteractiveViewer(
+                minScale: 0.8,
+                maxScale: 5.0,
+                child: Image.memory(bytes, fit: BoxFit.contain),
+              ),
+            ),
+            Positioned(
+              right: 8,
+              top: 8,
+              child: GestureDetector(
+                onTap: () => Navigator.pop(ctx),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFFF5F57),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black54,
+                        blurRadius: 4,
+                        offset: Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  alignment: Alignment.center,
+                  child: const Icon(
+                    Icons.close,
+                    size: 18,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -941,7 +1038,7 @@ class _JournalEntryState extends State<JournalEntry>
       children: [
         Row(
           children: [
-            _sectionTitle('Thoughts'),
+            _sectionTitle('Reflective Thoughts'),
             const Spacer(),
             // Trash icon clears the local field immediately (optimistic).
             // The cleared state is persisted on the next Save. Disabled
