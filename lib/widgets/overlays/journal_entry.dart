@@ -49,6 +49,12 @@ class _JournalEntryState extends State<JournalEntry>
   // Visual tokens — mirror UserSettings.
   static const Color _inputFill = Color(0xFF555555);
 
+  // Captured in initState so dispose can clear the voice sink without
+  // touching the (possibly already-unmounted) BuildContext. Storing
+  // the notifier itself is the correct pattern for Provider lookups
+  // that need to run during teardown.
+  late final ChatState _chatState;
+
   final JournalService _service = JournalService();
   final TextEditingController _thoughts = TextEditingController();
   final TextEditingController _weight = TextEditingController();
@@ -130,6 +136,7 @@ class _JournalEntryState extends State<JournalEntry>
   @override
   void initState() {
     super.initState();
+    _chatState = context.read<ChatState>();
     WidgetsBinding.instance.addObserver(this);
     _thoughts.addListener(_onFormMutated);
     _weight.addListener(_onFormMutated);
@@ -139,8 +146,7 @@ class _JournalEntryState extends State<JournalEntry>
       _measurementFocus[entry.key]!
           .addListener(() => _flushOnBlur(_measurementFocus[entry.key]!));
     }
-    final cs = context.read<ChatState>();
-    cs.setVoiceSink(VoiceSink(
+    _chatState.setVoiceSink(VoiceSink(
       label: 'Journal',
       onStart: () => _thoughtsPrefix = _thoughts.text,
       // Unused under batch transport — retained for the VoiceSink
@@ -450,13 +456,6 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
-    // CRITICAL: release primary focus BEFORE disposing any FocusNode.
-    // If a FocusNode is disposed while still holding focus, the global
-    // FocusManager keeps a dangling reference to it — subsequent taps
-    // in the chat-input row (mute, mode slider, talk, send) go to the
-    // dead node and do nothing. This is the symptom we kept seeing
-    // after closing the panel. Unfocus first, dispose second.
-    FocusManager.instance.primaryFocus?.unfocus();
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
@@ -464,14 +463,6 @@ class _JournalEntryState extends State<JournalEntry>
     // flush on focus loss; the remaining loss window is just "user
     // close-tapped mid-typing without leaving the field."
     _autosaveTimer?.cancel();
-    // Clear voice sink so any in-flight PTT release routes back to the
-    // chat default and the PTT button hides (unless the user explicitly
-    // chose Voice in the slider).
-    try {
-      context.read<ChatState>().setVoiceSink(null);
-    } catch (_) {
-      // context may already be unmounted in pathological teardown paths.
-    }
     _thoughts.dispose();
     _weight.dispose();
     _weightFocus.dispose();
@@ -482,6 +473,14 @@ class _JournalEntryState extends State<JournalEntry>
       f.dispose();
     }
     _service.dispose();
+    // Release any field that still holds focus BEFORE the FocusNodes
+    // above are disposed-out (above) and BEFORE super.dispose() — a
+    // dangling primaryFocus on a dead node was the original
+    // chat-input wedge symptom. Then clear the global voice sink via
+    // the captured notifier reference so PTT visibility falls back to
+    // the slider preference.
+    FocusManager.instance.primaryFocus?.unfocus();
+    _chatState.setVoiceSink(null);
     super.dispose();
   }
 

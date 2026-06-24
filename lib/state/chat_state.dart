@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
+import '../models/voice_mode.dart';
 import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
@@ -15,6 +16,7 @@ class ChatState extends ChangeNotifier {
   bool _ttsEnabled = true;
   String? _activeBloom;
   VoiceSink? _voiceSink;
+  VoiceMode _voiceMode = VoiceMode.pushToTalk;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -26,6 +28,13 @@ class ChatState extends ChangeNotifier {
   bool get ttsEnabled => _ttsEnabled;
   String? get activeBloom => _activeBloom;
   VoiceSink? get voiceSink => _voiceSink;
+  VoiceMode get voiceMode => _voiceMode;
+
+  void setVoiceMode(VoiceMode mode) {
+    if (_voiceMode == mode) return;
+    _voiceMode = mode;
+    notifyListeners();
+  }
 
   /// Registers (or clears) the routing target for the global PTT mic.
   /// While non-null, ChatScreen pipes transcripts through the sink

@@ -8,31 +8,48 @@ import '../widgets/overlays/journal_entry.dart';
 ///
 /// All form logic — autosave, photo upload, VoiceSink registration in
 /// initState / clear in dispose — stays inside [JournalEntry]. This
-/// wrapper exists only to give the route its own AppBar (with the red
-/// × close affordance) and dark background.
+/// wrapper exists only to give the route its own AppBar, dark
+/// background, and one shared concern: dropping any field focus
+/// BEFORE the pop transition starts.
 ///
-/// The × tap calls `Navigator.of(context).pop()` which targets the
-/// nested Navigator that pushed this route. After the pop animation,
-/// the framework runs [JournalEntry]'s dispose — that handles voice
-/// sink teardown, autosave-timer cancellation, focus-node disposal,
-/// etc. cleanly and atomically, the way Flutter is designed to.
+/// Three independent triggers can close this route — the leading
+/// back arrow, the iOS edge-swipe / Android system back gesture, and
+/// any programmatic pop. The leading handler covers the first with
+/// the earliest possible unfocus; [PopScope.onPopInvokedWithResult]
+/// covers the gesture/system path; [JournalEntry.dispose] is the final
+/// backstop for all of them. The duplicate unfocus calls are
+/// idempotent — clearing already-null focus is a no-op.
 class JournalRoute extends StatelessWidget {
   const JournalRoute({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFF1B1B1B),
-      appBar: AppBar(
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, result) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
+      child: Scaffold(
         backgroundColor: const Color(0xFF1B1B1B),
-        foregroundColor: Colors.white,
-        title: const Text('Journal Entry'),
-        // No explicit actions — the AppBar's auto-supplied leading ←
-        // back arrow is the single close affordance. iOS swipe-back
-        // gesture works for free. (We previously had a red × on the
-        // right too, which was redundant.)
+        appBar: AppBar(
+          backgroundColor: const Color(0xFF1B1B1B),
+          foregroundColor: Colors.white,
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            tooltip: 'Back',
+            onPressed: () {
+              // Drop focus FIRST so the pop transition starts with a
+              // clean focus tree — otherwise the disposed TextField's
+              // FocusNode can outlive the route briefly and leave the
+              // chat-input row pointer-dead on Flutter Web.
+              FocusManager.instance.primaryFocus?.unfocus();
+              Navigator.of(context).maybePop();
+            },
+          ),
+          title: const Text('Journal Entry'),
+        ),
+        body: const JournalEntry(),
       ),
-      body: const JournalEntry(),
     );
   }
 }

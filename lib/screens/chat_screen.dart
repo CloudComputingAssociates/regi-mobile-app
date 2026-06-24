@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
 import '../models/utterance_result.dart';
+import '../models/voice_mode.dart';
 import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
@@ -26,6 +27,7 @@ import '../widgets/mic_level_bars.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
 import 'journal_route.dart';
+import 'settings_route.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
@@ -49,37 +51,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // ternary. Chat-input lives OUTSIDE this Navigator so it remains
   // mounted/active regardless of which inner route is showing.
   final GlobalKey<NavigatorState> _innerNavKey = GlobalKey<NavigatorState>();
-
-  // Bumped on every inner-Navigator pop. Used as the ValueKey for
-  // ChatInput so the row is fully torn down and reconstructed after a
-  // pushed route (Journal, AddFood, …) closes. Belt-and-suspenders
-  // against stale Flutter Web HtmlElementView / FocusNode / InkWell
-  // hit-test state that has previously left the mute / mode / talk /
-  // send controls visually present but pointer-dead. Cheap — ChatInput
-  // has no expensive init work and its TextField repopulates from
-  // state.currentInput on first build.
-  int _chatInputRev = 0;
-
-  // Observer wired into the inner Navigator that runs three cleanup
-  // tasks on every pop:
-  //   1. Drop primary focus (kills any orphan FocusNode from a popped
-  //      TextField).
-  //   2. Clear the global VoiceSink. JournalEntry.dispose tries to do
-  //      this too, but its `context.read<ChatState>()` is inside a
-  //      try/catch — if the State's context is already unmounted at
-  //      dispose time, the clear silently fails and the PTT stays
-  //      visible forever. Doing it here, with this State's still-valid
-  //      context, is reliable.
-  //   3. Bump [_chatInputRev] so ChatInput remounts with a fresh
-  //      FocusNode + InkWell ripple state.
-  late final NavigatorObserver _innerNavObserver = _InnerNavObserver(
-    onPop: () {
-      if (!mounted) return;
-      FocusManager.instance.primaryFocus?.unfocus();
-      context.read<ChatState>().setVoiceSink(null);
-      setState(() => _chatInputRev++);
-    },
-  );
 
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
@@ -810,8 +781,14 @@ class _ChatScreenState extends State<ChatScreen> {
     // voice sink (e.g. Journal needs dictation regardless of the user's
     // slider preference), OR the user explicitly chose Voice in the
     // mode slider for plain chat. See CLAUDE.md.
-    final showPtt =
-        state.voiceSink != null || state.mode == InputMode.voice;
+    //
+    // Wake-word voiceMode hides the PTT entirely — the AppBar mic
+    // indicator + level bars become the sole "is Regi listening" cue.
+    // (Actual always-on listener is not yet wired; for now wake-word
+    // mode just hides the button.)
+    final showPtt = state.voiceMode != VoiceMode.wakeWord &&
+        (state.voiceSink != null || state.mode == InputMode.voice);
+    final isToggleMode = state.voiceMode == VoiceMode.pressTalk;
     final screenSize = MediaQuery.of(context).size;
     final pttPos = _clampPttPosition(
       _pttPosition ?? _defaultPttPosition(screenSize),
@@ -917,6 +894,17 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: _handleNewChat,
           ),
           IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'App Settings',
+            onPressed: () {
+              _innerNavKey.currentState?.push(
+                MaterialPageRoute(
+                  builder: (_) => const SettingsRoute(),
+                ),
+              );
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',
             onPressed: () => context.read<AuthService>().logout(),
@@ -934,7 +922,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 // Navigator so it stays mounted across route changes.
                 child: Navigator(
                   key: _innerNavKey,
-                  observers: [_innerNavObserver],
                   onGenerateRoute: (settings) {
                     if (settings.name == '/' || settings.name == null) {
                       return MaterialPageRoute(
@@ -948,7 +935,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               ChatInput(
-                key: ValueKey('chat-input-$_chatInputRev'),
                 onSend: _sendMessage,
                 onTtsToggle: _handleTtsToggle,
               ),
@@ -1037,6 +1023,8 @@ class _ChatScreenState extends State<ChatScreen> {
               top: pttPos.dy,
               child: PttButton(
                 dragMode: _pttDragMode,
+                toggleMode: isToggleMode,
+                toggleActive: isToggleMode && state.isTalkActive,
                 onPressStart: _handleTalkStart,
                 onPressEnd: _handleTalkEnd,
                 onEnterDragMode: _handlePttEnterDragMode,
@@ -1050,21 +1038,3 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-// Inner-Navigator observer that fires [onPop] after every pop. The
-// owner uses it to bump a key counter on ChatInput so the chat-input
-// row remounts fresh after a route closes. Without the remount, on
-// Flutter Web we've seen the mute / mode / talk / send InkWell hit-
-// testing go pointer-dead while the TextField stays usable — a stale
-// HtmlElementView / FocusNode interaction we can't fix at the focus
-// layer. Tearing the whole row down and rebuilding it sidesteps the
-// problem entirely.
-class _InnerNavObserver extends NavigatorObserver {
-  _InnerNavObserver({required this.onPop});
-  final VoidCallback onPop;
-
-  @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    super.didPop(route, previousRoute);
-    onPop();
-  }
-}

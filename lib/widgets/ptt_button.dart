@@ -11,6 +11,8 @@ class PttButton extends StatefulWidget {
     this.onEnterDragMode,
     this.onExitDragMode,
     this.onDragMove,
+    this.toggleMode = false,
+    this.toggleActive = false,
   });
 
   final VoidCallback onPressStart;
@@ -24,6 +26,15 @@ class PttButton extends StatefulWidget {
   final VoidCallback? onEnterDragMode;
   final VoidCallback? onExitDragMode;
   final void Function(Offset delta)? onDragMove;
+
+  /// VoiceMode.pressTalk: a single tap toggles recording on, the next
+  /// single tap toggles it off. When this is true, the hold-to-talk
+  /// pointer-down semantics are disabled — only pointer-up fires the
+  /// callbacks. [toggleActive] tells the button whether it should
+  /// render the "LIVE" overlay (the actual recording state lives in
+  /// ChatState.isTalkActive on the parent).
+  final bool toggleMode;
+  final bool toggleActive;
 
   @override
   State<PttButton> createState() => _PttButtonState();
@@ -48,10 +59,10 @@ class _PttButtonState extends State<PttButton> {
   void _handlePointerDown(PointerDownEvent event) {
     _currentPressStart = DateTime.now();
     _currentPressMovement = 0;
-    if (widget.dragMode) {
-      // Drag mode: press-to-talk is suppressed. No haptic, no press-
-      // scale, no onPressStart. We still track movement/duration to
-      // classify the upcoming up event as tap vs. drag.
+    if (widget.dragMode || widget.toggleMode) {
+      // Drag mode AND toggle mode both suppress press-to-talk on down.
+      // Toggle mode fires its on/off in pointer-up so a tap (not a
+      // hold) is what flips state.
       return;
     }
     setState(() => _pressed = true);
@@ -71,6 +82,18 @@ class _PttButtonState extends State<PttButton> {
       _checkDoubleTap(exitingDrag: true);
       return;
     }
+    if (widget.toggleMode) {
+      // Single tap → toggle. Movement/duration check skipped (the
+      // double-tap-to-drag affordance is disabled in toggle mode; to
+      // reposition the button, switch to PTT mode in App Settings).
+      HapticFeedback.lightImpact();
+      if (widget.toggleActive) {
+        widget.onPressEnd();
+      } else {
+        widget.onPressStart();
+      }
+      return;
+    }
     if (!_pressed) return;
     setState(() => _pressed = false);
     widget.onPressEnd();
@@ -81,7 +104,7 @@ class _PttButtonState extends State<PttButton> {
     // A cancel is not a tap — clear pending first-tap state so the
     // next press-to-talk can't accidentally close a double-tap pair.
     _lastTapUpTime = null;
-    if (widget.dragMode) return;
+    if (widget.dragMode || widget.toggleMode) return;
     if (!_pressed) return;
     setState(() => _pressed = false);
     widget.onPressEnd();
@@ -110,6 +133,10 @@ class _PttButtonState extends State<PttButton> {
 
   @override
   Widget build(BuildContext context) {
+    // In toggle mode, "active" drives the same visual state as PTT
+    // "pressed" — amber border + glow — so the user gets immediate
+    // confirmation the toggle flipped.
+    final active = _pressed || (widget.toggleMode && widget.toggleActive);
     // Listener (raw pointer events) instead of GestureDetector so we don't
     // get a spurious onTapCancel when a press exceeds Flutter's long-press
     // timeout. Press = down, release = up, no gesture-arena guessing.
@@ -130,13 +157,13 @@ class _PttButtonState extends State<PttButton> {
               duration: const Duration(milliseconds: 80),
               width: widget.size,
               height: widget.size,
-              transform: Matrix4.identity()..scale(_pressed ? 0.95 : 1.0),
+              transform: Matrix4.identity()..scale(active ? 0.95 : 1.0),
               transformAlignment: Alignment.center,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: const Color(0xFF2196F3),
                 boxShadow: [
-                  if (_pressed)
+                  if (active)
                     BoxShadow(
                       color: const Color(0xFFF2B33D).withValues(alpha: 0.85),
                       blurRadius: 24,
@@ -150,7 +177,7 @@ class _PttButtonState extends State<PttButton> {
                     ),
                 ],
                 border: Border.all(
-                  color: _pressed
+                  color: active
                       ? const Color(0xFFF2B33D)
                       : Colors.white,
                   width: 3,
@@ -175,6 +202,30 @@ class _PttButtonState extends State<PttButton> {
                 ),
               ),
             ),
+            // Toggle-mode "LIVE" badge: bold red text centered over the
+            // fingerprint while recording. Disappears on the next tap
+            // when the toggle flips off.
+            if (widget.toggleMode && widget.toggleActive)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Container(
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.black.withValues(alpha: 0.45),
+                    ),
+                    child: const Text(
+                      'LIVE',
+                      style: TextStyle(
+                        color: Color(0xFFFF3B30),
+                        fontWeight: FontWeight.w900,
+                        fontSize: 20,
+                        letterSpacing: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             if (widget.dragMode)
               Positioned(
                 right: -4,
