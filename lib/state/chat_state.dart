@@ -14,10 +14,6 @@ class ChatState extends ChangeNotifier {
   String _currentInput = '';
   bool _ttsEnabled = true;
   String? _activeBloom;
-  // Left-nav full-area destination (Add Food, Enter Journal). Independent
-  // of [_activeBloom] — a bloom can appear ON TOP of an overlay; both
-  // close independently. See CLAUDE.md for the overlay vs bloom split.
-  String? _activeOverlay;
   VoiceSink? _voiceSink;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
@@ -29,7 +25,6 @@ class ChatState extends ChangeNotifier {
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
   String? get activeBloom => _activeBloom;
-  String? get activeOverlay => _activeOverlay;
   VoiceSink? get voiceSink => _voiceSink;
 
   /// Registers (or clears) the routing target for the global PTT mic.
@@ -78,21 +73,6 @@ class ChatState extends ChangeNotifier {
   void closeBloom() {
     if (_activeBloom == null) return;
     _activeBloom = null;
-    notifyListeners();
-  }
-
-  /// Opens a left-nav full-area overlay (Add Food, Enter Journal).
-  /// Replaces the chat output area while active. Independent from any
-  /// bloom that may be on top.
-  void openOverlay(String key) {
-    if (_activeOverlay == key) return;
-    _activeOverlay = key;
-    notifyListeners();
-  }
-
-  void closeOverlay() {
-    if (_activeOverlay == null) return;
-    _activeOverlay = null;
     notifyListeners();
   }
 

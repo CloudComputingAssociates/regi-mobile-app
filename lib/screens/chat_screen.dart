@@ -24,8 +24,8 @@ import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
 import '../widgets/blooms/user_settings.dart';
-import '../widgets/overlays/journal_entry.dart';
 import '../widgets/ptt_button.dart';
+import 'journal_route.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
@@ -43,6 +43,13 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  // Nested Navigator that owns the swappable area above ChatInput. Route
+  // 0 ('/') is ChatOutput; left-nav overlays (Journal, AddFood, …) will
+  // be pushed onto this stack instead of swapped in via a conditional
+  // ternary. Chat-input lives OUTSIDE this Navigator so it remains
+  // mounted/active regardless of which inner route is showing.
+  final GlobalKey<NavigatorState> _innerNavKey = GlobalKey<NavigatorState>();
+
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
   final SettingsService _settings = SettingsService();
@@ -755,46 +762,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // Friendly label for the AppBar title while an overlay is active.
-  // Branding is suppressed in favor of "(overlay name)" so the mobile
-  // header has room for the overlay's actions (Save / Close) without
-  // wrapping or truncation.
-  String _overlayDisplayName(String key) {
-    switch (key) {
-      case 'Journal':
-        return 'Journal Entry';
-      case 'AddFood':
-        return 'Add Food';
-      default:
-        return key;
-    }
-  }
-
-  // Renders the active left-nav overlay into the chat-output slot. See
-  // CLAUDE.md for the overlay vs bloom split — overlays replace the
-  // entire conversation area; blooms (rendered elsewhere) partially
-  // occlude whatever is behind them.
-  Widget _renderOverlay(String key) {
-    switch (key) {
-      case 'Journal':
-        return const JournalEntry();
-      case 'AddFood':
-        return const Center(
-          child: Text(
-            'Add Food Placeholder',
-            style: TextStyle(color: Colors.white, fontSize: 18),
-          ),
-        );
-      default:
-        return Center(
-          child: Text(
-            'OVERLAY: $key',
-            style: const TextStyle(color: Colors.white),
-          ),
-        );
-    }
-  }
-
   // Mute button is dual-purpose: it flips the ttsEnabled flag AND abends
   // any in-flight playback. Tapping mid-utterance must silence audio
   // immediately, not just affect the NEXT reply. _tts.stop() tears down
@@ -846,7 +813,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  context.read<ChatState>().openOverlay('AddFood');
+                  // TODO: AddFoodRoute — once we have a route page
+                  // (mirror of JournalRoute), push it onto the inner
+                  // navigator the same way Enter Journal does below.
                 },
               ),
               ListTile(
@@ -856,24 +825,15 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
-                  // Capture cs BEFORE Navigator.pop. After the drawer
-                  // pops, the ListTile's BuildContext is detached and
-                  // Provider lookups + notify propagation through it
-                  // get unreliable — symptom we hit on the second
-                  // open: openOverlay fired but ChatScreen never
-                  // rebuilt. cs is the notifier directly, not the
-                  // context, so it stays valid.
-                  final cs = context.read<ChatState>();
                   Navigator.pop(context);
-                  if (cs.activeOverlay == 'Journal') {
-                    cs.closeOverlay();
-                  } else {
-                    cs.openOverlay('Journal');
-                  }
-                  // Belt-and-suspenders: force a rebuild on ChatScreen
-                  // in case Provider's notify is dropped on the way
-                  // out of the popped drawer route.
-                  if (mounted) setState(() {});
+                  // Push onto the inner Navigator so chat-input
+                  // stays mounted underneath. Close comes from the
+                  // route's own AppBar × (see JournalRoute).
+                  _innerNavKey.currentState?.push(
+                    MaterialPageRoute(
+                      builder: (_) => const JournalRoute(),
+                    ),
+                  );
                 },
               ),
             ],
@@ -884,15 +844,13 @@ class _ChatScreenState extends State<ChatScreen> {
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
         // Title shrinks to the overlay's name while an overlay is open —
-        // on mobile we don't have horizontal room for branding + a long
-        // overlay name + the AppBar actions. Branding returns once the
-        // overlay closes. Mic-status (amber mic + level bars) shows in
-        // BOTH layouts so the user always has a "is it listening" cue.
+        // Mic-status (amber mic + level bars) sits next to the brand
+        // so the "is it listening" cue is always visible. The route's
+        // own AppBar supplies overlay-specific titling when an overlay
+        // is pushed onto the inner Navigator.
         title: Row(
           children: [
-            Text(state.activeOverlay != null
-                ? _overlayDisplayName(state.activeOverlay!)
-                : 'RegiMenu'),
+            const Text('RegiMenu'),
             const SizedBox(width: 12),
             Icon(
               Icons.mic,
@@ -914,44 +872,19 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          // Red × Close is the only colored AppBar action — it sits at
-          // the right edge whenever an overlay is open. Overlays
-          // autosave, so there is no Save icon. The chat-only Clear
-          // action hides while an overlay is active because we don't
-          // wipe form state out from under autosave.
-          // X stays visible whenever ANY overlay-ish state is set: the
-          // overlay name, OR a voice sink (which only overlays register).
-          // This means even if `activeOverlay` somehow got cleared while
-          // the UI still shows the panel (the symptom we were chasing),
-          // the X is still there and the user can still escape.
-          if (state.activeOverlay != null)
-            IconButton(
-              icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
-              tooltip: 'Close ${state.activeOverlay}',
-              onPressed: () {
-                final cs = context.read<ChatState>();
-                // Pop any open dialog routes first (e.g. the photo zoom
-                // dialog). Otherwise a leftover dialog's dark barrier
-                // sits on top of chat-input after the overlay closes
-                // and steals all taps, leaving only edge elements like
-                // the Mute icon visible/clickable. popUntil stops at
-                // the first non-PopupRoute so we don't accidentally
-                // pop back to login.
-                Navigator.of(context)
-                    .popUntil((route) => route is! PopupRoute);
-                cs.closeOverlay();
-                if (mounted) setState(() {});
-              },
-            ),
+          // Overlay close affordance lives on the pushed route's own
+          // AppBar (see JournalRoute) — pops via Navigator. No outer
+          // AppBar close button needed.
           // Settings is intentionally NOT in the AppBar — the
           // UserSettings bloom opens only via a chat/voice command
           // (the command gate dispatches openBloom('UserSettings')).
-          if (state.activeOverlay == null)
-            IconButton(
-              icon: const Icon(Icons.clear_all),
-              tooltip: 'Clear',
-              onPressed: _handleNewChat,
-            ),
+          // Clear renders unconditionally — chat is always route 0
+          // beneath any pushed overlay, and Clear acts on chat.
+          IconButton(
+            icon: const Icon(Icons.clear_all),
+            tooltip: 'Clear',
+            onPressed: _handleNewChat,
+          ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',
@@ -964,9 +897,23 @@ class _ChatScreenState extends State<ChatScreen> {
           Column(
             children: [
               Expanded(
-                child: state.activeOverlay != null
-                    ? _renderOverlay(state.activeOverlay!)
-                    : const ChatOutput(),
+                // Nested Navigator owns the swappable area. Route 0 is
+                // ChatOutput; left-nav overlays push routes here in
+                // later steps. Chat-input below is OUTSIDE this
+                // Navigator so it stays mounted across route changes.
+                child: Navigator(
+                  key: _innerNavKey,
+                  onGenerateRoute: (settings) {
+                    if (settings.name == '/' || settings.name == null) {
+                      return MaterialPageRoute(
+                        settings: settings,
+                        builder: (_) => const ChatOutput(),
+                      );
+                    }
+                    // Other routes wired in later steps.
+                    return null;
+                  },
+                ),
               ),
               ChatInput(
                 onSend: _sendMessage,

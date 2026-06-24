@@ -430,16 +430,6 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
-    // If the photo zoom dialog (or any other locally-opened modal) is
-    // still on top when the overlay closes, dismiss it. Otherwise a
-    // leftover dialog's dark barrier persists over chat-input after
-    // close, blocking taps.
-    try {
-      final nav = Navigator.of(context, rootNavigator: true);
-      nav.popUntil((route) => route is! PopupRoute);
-    } catch (_) {
-      // context may already be detached during teardown.
-    }
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
@@ -538,6 +528,7 @@ class _JournalEntryState extends State<JournalEntry>
     final now = DateTime.now();
     final picked = await showDatePicker(
       context: context,
+      useRootNavigator: false,
       initialDate: _entryDate,
       firstDate: DateTime(now.year - 5),
       lastDate: now,
@@ -966,9 +957,15 @@ class _JournalEntryState extends State<JournalEntry>
   /// Fullscreen-ish dialog displaying the photo at full size with a
   /// floating red × in the top-right to dismiss. Used for both
   /// freshly-picked and server-loaded photo bytes.
+  ///
+  /// `useRootNavigator: false` is critical — it pushes onto the inner
+  /// (nested) Navigator that JournalRoute is on, so if the user closes
+  /// the Journal route while this dialog is open, the dialog pops with
+  /// it instead of surviving as an orphaned barrier over chat-input.
   void _openPhotoZoom(Uint8List bytes) {
     showDialog<void>(
       context: context,
+      useRootNavigator: false,
       barrierColor: Colors.black87,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
@@ -1026,6 +1023,7 @@ class _JournalEntryState extends State<JournalEntry>
   Future<void> _openAddPhotoBloom() async {
     final source = await showDialog<ImageSource>(
       context: context,
+      useRootNavigator: false,
       barrierColor: Colors.black54,
       builder: (ctx) => Dialog(
         backgroundColor: Colors.transparent,
@@ -1152,6 +1150,7 @@ class _JournalEntryState extends State<JournalEntry>
     if (_thoughts.text.length > 50) {
       final ok = await showDialog<bool>(
         context: context,
+        useRootNavigator: false,
         builder: (ctx) => AlertDialog(
           backgroundColor: const Color(0xFF252525),
           title: const Text(
