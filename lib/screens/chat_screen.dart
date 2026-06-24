@@ -60,15 +60,23 @@ class _ChatScreenState extends State<ChatScreen> {
   // state.currentInput on first build.
   int _chatInputRev = 0;
 
-  // Observer wired into the inner Navigator that bumps [_chatInputRev]
-  // on pop AND drops any lingering primary focus. didPop fires as the
-  // pop animation starts; that's early enough to schedule the remount
-  // for the next frame so the user sees responsive chat-input as soon
-  // as the route is gone.
+  // Observer wired into the inner Navigator that runs three cleanup
+  // tasks on every pop:
+  //   1. Drop primary focus (kills any orphan FocusNode from a popped
+  //      TextField).
+  //   2. Clear the global VoiceSink. JournalEntry.dispose tries to do
+  //      this too, but its `context.read<ChatState>()` is inside a
+  //      try/catch — if the State's context is already unmounted at
+  //      dispose time, the clear silently fails and the PTT stays
+  //      visible forever. Doing it here, with this State's still-valid
+  //      context, is reliable.
+  //   3. Bump [_chatInputRev] so ChatInput remounts with a fresh
+  //      FocusNode + InkWell ripple state.
   late final NavigatorObserver _innerNavObserver = _InnerNavObserver(
     onPop: () {
       if (!mounted) return;
       FocusManager.instance.primaryFocus?.unfocus();
+      context.read<ChatState>().setVoiceSink(null);
       setState(() => _chatInputRev++);
     },
   );
@@ -942,8 +950,6 @@ class _ChatScreenState extends State<ChatScreen> {
               ChatInput(
                 key: ValueKey('chat-input-$_chatInputRev'),
                 onSend: _sendMessage,
-                onTalkStart: _handleTalkStart,
-                onTalkEnd: _handleTalkEnd,
                 onTtsToggle: _handleTtsToggle,
               ),
             ],
