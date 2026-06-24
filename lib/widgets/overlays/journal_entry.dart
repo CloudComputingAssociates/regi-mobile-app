@@ -479,8 +479,16 @@ class _JournalEntryState extends State<JournalEntry>
     // chat-input wedge symptom. Then clear the global voice sink via
     // the captured notifier reference so PTT visibility falls back to
     // the slider preference.
+    //
+    // The setVoiceSink clear is DEFERRED to the next frame: this
+    // dispose runs because closeOverlay rebuilt ChatScreen, so we're
+    // mid-build. Calling notifyListeners synchronously here would be
+    // a re-entrant markNeedsBuild during build and wedges the chat
+    // surface. Capturing the notifier into a local lets the closure
+    // run safely after the dispose / build pair has fully unwound.
     FocusManager.instance.primaryFocus?.unfocus();
-    _chatState.setVoiceSink(null);
+    final cs = _chatState;
+    WidgetsBinding.instance.addPostFrameCallback((_) => cs.setVoiceSink(null));
     super.dispose();
   }
 
