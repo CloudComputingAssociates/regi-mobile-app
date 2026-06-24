@@ -293,6 +293,10 @@ class _JournalEntryState extends State<JournalEntry>
 
   /// Wipes form fields back to defaults (for stepping to a date with no
   /// entry). entryDate is NOT touched — caller already set it.
+  ///
+  /// Also nulls _journalEntryId because if we don't, a later Clear
+  /// Entry tap on this blank day would delete the PRIOR day's entry
+  /// (the id is still pointing at it).
   void _resetFormFields() {
     _isPrefilling = true;
     try {
@@ -307,6 +311,7 @@ class _JournalEntryState extends State<JournalEntry>
       _photoBytes = null;
       _existingPhotoUrl = null;
       _existingPhotoBytes = null;
+      _journalEntryId = null;
     } finally {
       _isPrefilling = false;
     }
@@ -707,23 +712,32 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   Widget _deleteEntryButton() {
-    // Always available unless a save is mid-flight. Even with no
-    // server-side entry, the button wipes the local form (useful if
-    // the user typed but autosave hadn't fired yet) and toasts the
-    // confirmation — semantics match the label "Clear Entry."
-    final canClear = !_isSaving;
+    // Enabled iff there's a server entry to clear — same signal that
+    // drives the red dot next to the date chip. No entry on the
+    // server = nothing to clear = button is disabled (greyed). When a
+    // typed-but-not-yet-saved draft exists the user hasn't created
+    // an entry yet, so "clear" doesn't apply.
+    final canClear = _journalEntryId != null && !_isSaving;
+    const red = Color(0xFFFF5F57);
     return Center(
-      child: TextButton(
+      child: OutlinedButton.icon(
         onPressed: canClear ? _clearEntry : null,
-        style: TextButton.styleFrom(
-          foregroundColor: const Color(0xFFFF5F57),
-          disabledForegroundColor: Colors.white24,
-        ),
-        child: const Text(
+        icon: const Icon(Icons.delete_outline, size: 18),
+        label: const Text(
           'Clear Entry',
           style: TextStyle(
             fontSize: 14,
             fontWeight: FontWeight.w600,
+            letterSpacing: 0.3,
+          ),
+        ),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: red,
+          disabledForegroundColor: Colors.white24,
+          side: const BorderSide(color: red, width: 1.5),
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
           ),
         ),
       ),
