@@ -134,6 +134,20 @@ stroke-style glyphs (`Icons.check`, `Icons.close`) over filled-disc
 variants (`Icons.check_circle`, `Icons.cancel`) so they match peer
 icons' visual weight and don't overflow the bar.
 
+## Workflow conventions for Claude
+
+- **Builds:** Claude MAY run `flutter build` / `flutter analyze` / `flutter test`
+  to verify changes compile and pass.
+- **Commits:** Claude NEVER runs `git commit`. After every set of code
+  changes, Claude provides a TERSE commit message (one line, lower-case,
+  imperative) for the user to copy. The user owns the commit.
+- **Cross-project edits:** Claude NEVER modifies files outside this
+  project (e.g. `regi-api`, `regi-web`). If a change requires work in a
+  sibling repo, Claude SUGGESTS the change in prose — describing what
+  needs to change and why. The user may then explicitly ask for a
+  ready-to-paste prompt for that other project. Silent cross-project
+  edits are confusing and forbidden.
+
 ## What lives where
 
 | File | Purpose |

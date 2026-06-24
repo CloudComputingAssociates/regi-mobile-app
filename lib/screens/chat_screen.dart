@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -50,16 +50,28 @@ class _ChatScreenState extends State<ChatScreen> {
   // mounted/active regardless of which inner route is showing.
   final GlobalKey<NavigatorState> _innerNavKey = GlobalKey<NavigatorState>();
 
-  // Observer that runs on every push/pop of the inner Navigator and
-  // forces FocusManager.primaryFocus to null. Without this, popping a
-  // route whose body had a focused TextField (Thoughts, Weight, etc.)
-  // can leave FocusManager pointing at a now-disposed FocusNode AND
-  // leave the browser DOM holding focus on the old element. Either
-  // mode silently swallows subsequent taps on chat-input. Clearing
-  // here, at the navigator level, fires after the route's own dispose
-  // (which also unfocuses) and catches anything that slipped through.
-  late final NavigatorObserver _focusClearOnPopObserver =
-      _FocusClearOnPopObserver();
+  // Bumped on every inner-Navigator pop. Used as the ValueKey for
+  // ChatInput so the row is fully torn down and reconstructed after a
+  // pushed route (Journal, AddFood, …) closes. Belt-and-suspenders
+  // against stale Flutter Web HtmlElementView / FocusNode / InkWell
+  // hit-test state that has previously left the mute / mode / talk /
+  // send controls visually present but pointer-dead. Cheap — ChatInput
+  // has no expensive init work and its TextField repopulates from
+  // state.currentInput on first build.
+  int _chatInputRev = 0;
+
+  // Observer wired into the inner Navigator that bumps [_chatInputRev]
+  // on pop AND drops any lingering primary focus. didPop fires as the
+  // pop animation starts; that's early enough to schedule the remount
+  // for the next frame so the user sees responsive chat-input as soon
+  // as the route is gone.
+  late final NavigatorObserver _innerNavObserver = _InnerNavObserver(
+    onPop: () {
+      if (!mounted) return;
+      FocusManager.instance.primaryFocus?.unfocus();
+      setState(() => _chatInputRev++);
+    },
+  );
 
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
@@ -914,7 +926,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 // Navigator so it stays mounted across route changes.
                 child: Navigator(
                   key: _innerNavKey,
-                  observers: [_focusClearOnPopObserver],
+                  observers: [_innerNavObserver],
                   onGenerateRoute: (settings) {
                     if (settings.name == '/' || settings.name == null) {
                       return MaterialPageRoute(
@@ -928,6 +940,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               ChatInput(
+                key: ValueKey('chat-input-$_chatInputRev'),
                 onSend: _sendMessage,
                 onTalkStart: _handleTalkStart,
                 onTalkEnd: _handleTalkEnd,
@@ -1031,23 +1044,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-// Belt-and-suspenders focus reset on every inner-Navigator pop. The
-// popped route's own dispose already calls
-// FocusManager.instance.primaryFocus?.unfocus(), but on Flutter Web the
-// browser DOM can still hold focus on the disposed TextField's <input>
-// element — that latches taps and silently swallows clicks on
-// chat-input until something else takes focus. This observer fires
-// after didPop completes and forces a second unfocus + a
-// SystemChannels.textInput close so the IME / DOM focus is fully
-// released.
-class _FocusClearOnPopObserver extends NavigatorObserver {
+// Inner-Navigator observer that fires [onPop] after every pop. The
+// owner uses it to bump a key counter on ChatInput so the chat-input
+// row remounts fresh after a route closes. Without the remount, on
+// Flutter Web we've seen the mute / mode / talk / send InkWell hit-
+// testing go pointer-dead while the TextField stays usable — a stale
+// HtmlElementView / FocusNode interaction we can't fix at the focus
+// layer. Tearing the whole row down and rebuilding it sidesteps the
+// problem entirely.
+class _InnerNavObserver extends NavigatorObserver {
+  _InnerNavObserver({required this.onPop});
+  final VoidCallback onPop;
+
   @override
   void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
     super.didPop(route, previousRoute);
-    FocusManager.instance.primaryFocus?.unfocus();
-    // Closes the soft-keyboard / web IME and drops any platform-side
-    // input connection. Without this, Flutter Web's HtmlElementView
-    // input can stay connected to the disposed TextField.
-    SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    onPop();
   }
 }
