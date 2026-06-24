@@ -854,10 +854,18 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
+                  // Capture-before-pop: reading the provider through
+                  // the ListTile context AFTER Navigator.pop puts the
+                  // read on a mid-deactivation context, which can
+                  // silently drop the notifyListeners and leave the
+                  // overlay slot un-set. Read first, pop second,
+                  // dispatch third.
+                  final cs = context.read<ChatState>();
                   Navigator.pop(context);
-                  // TODO: openOverlay('AddFood') once the AddFood
+                  // TODO: cs.openOverlay('AddFood') once the AddFood
                   // overlay widget exists — same dispatch as Enter
                   // Journal below.
+                  cs; // keep the captured ref alive for the lints
                 },
               ),
               ListTile(
