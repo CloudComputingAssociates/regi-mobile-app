@@ -27,13 +27,10 @@ class JournalRoute extends StatelessWidget {
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
         title: const Text('Journal Entry'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.close, color: Color(0xFFFF5F57)),
-            tooltip: 'Close Journal',
-            onPressed: () => Navigator.of(context).pop(),
-          ),
-        ],
+        // No explicit actions — the AppBar's auto-supplied leading ←
+        // back arrow is the single close affordance. iOS swipe-back
+        // gesture works for free. (We previously had a red × on the
+        // right too, which was redundant.)
       ),
       body: const JournalEntry(),
     );

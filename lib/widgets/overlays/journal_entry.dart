@@ -450,6 +450,13 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
+    // CRITICAL: release primary focus BEFORE disposing any FocusNode.
+    // If a FocusNode is disposed while still holding focus, the global
+    // FocusManager keeps a dangling reference to it — subsequent taps
+    // in the chat-input row (mute, mode slider, talk, send) go to the
+    // dead node and do nothing. This is the symptom we kept seeing
+    // after closing the panel. Unfocus first, dispose second.
+    FocusManager.instance.primaryFocus?.unfocus();
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
