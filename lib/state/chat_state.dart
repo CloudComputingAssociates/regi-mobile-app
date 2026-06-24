@@ -91,9 +91,14 @@ class ChatState extends ChangeNotifier {
   }
 
   void closeOverlay() {
-    if (_activeOverlay == null) return;
+    debugPrint('[ChatState.closeOverlay] called, before=$_activeOverlay');
+    if (_activeOverlay == null) {
+      debugPrint('[ChatState.closeOverlay] early-return (already null)');
+      return;
+    }
     _activeOverlay = null;
     notifyListeners();
+    debugPrint('[ChatState.closeOverlay] done, after=$_activeOverlay');
   }
 
   void setCurrentInput(String value) {

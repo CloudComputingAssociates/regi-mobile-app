@@ -808,6 +808,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
+    debugPrint('[ChatScreen.build] activeOverlay=${state.activeOverlay} activeBloom=${state.activeBloom}');
     // PTT comes alive when EITHER an overlay/bloom has registered a
     // voice sink (e.g. Journal needs dictation regardless of the user's
     // slider preference), OR the user explicitly chose Voice in the

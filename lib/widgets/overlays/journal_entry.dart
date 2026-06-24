@@ -417,6 +417,7 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   void dispose() {
+    debugPrint('[Journal.dispose] starting');
     WidgetsBinding.instance.removeObserver(this);
     // Cancel any pending autosave — there's no way to flush a debounced
     // POST during dispose (HTTP is async, dispose is sync, and we're
@@ -443,6 +444,7 @@ class _JournalEntryState extends State<JournalEntry>
     }
     _service.dispose();
     super.dispose();
+    debugPrint('[Journal.dispose] complete');
   }
 
   void _setThoughtsText(String value) {
