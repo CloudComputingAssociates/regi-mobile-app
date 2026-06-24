@@ -924,7 +924,13 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () {
                 debugPrint('[close-overlay] X tapped, activeOverlay=${state.activeOverlay}');
                 final cs = context.read<ChatState>();
-                cs.closeOverlay(); // now always notifies + bumps epoch
+                cs.closeOverlay();
+                // Belt-and-suspenders: also force a local setState on
+                // ChatScreen. If Provider's notify isn't reaching us
+                // for some reason (the symptom we keep seeing — close
+                // logs fire but no [ChatScreen.build] follows), this
+                // forces a rebuild directly through the framework.
+                if (mounted) setState(() {});
                 debugPrint('[close-overlay] after, activeOverlay=${cs.activeOverlay} epoch=${cs.overlayEpoch}');
               },
             ),
