@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
@@ -78,9 +79,13 @@ class _JournalEntryState extends State<JournalEntry>
   String _weightUnit = 'lb';
   XFile? _photo;
   Uint8List? _photoBytes;
-  // Photo signed URL returned by the GET for today's entry. Shown as a
-  // network image preview when the user hasn't picked a new photo.
+  // Photo signed URL returned by the GET for today's entry. We immediately
+  // fetch its bytes into [_existingPhotoBytes] and render via Image.memory
+  // — NOT Image.network — so Flutter web doesn't spawn an <img> platform
+  // view that can wedge the widget tree and block surrounding taps
+  // (notably the AppBar X close).
   String? _existingPhotoUrl;
+  Uint8List? _existingPhotoBytes;
   // Server id of today's entry, captured from prefill OR from the first
   // successful save. Needed to DELETE the photo on × tap when the photo
   // came from the server, and to upload a freshly-picked photo against
@@ -239,18 +244,17 @@ class _JournalEntryState extends State<JournalEntry>
     unawaited(_save());
   }
 
-  /// Cross-device coherence: GETs today's entry on mount so a user who
-  /// saved on the web sees the same state on the phone. Empty result
-  /// → blank form; populated → pre-fill every field.
+  /// Loads the entry for [_entryDate] from the server and prefills the
+  /// form. Used on mount (initial today-load) AND when the user steps
+  /// day-by-day via the date arrows.
   ///
-  /// Two-call dance: LIST (`GET /api/journal?from=&to=&limit=1`) returns
-  /// today's id but NOT photoSignedUrl (the server intentionally omits
-  /// signed URLs from list responses — see CLAUDE.md / regi-api comment
-  /// at services/journal_service.go:71-72). So when an entry exists, we
-  /// follow up with the detail endpoint (`GET /api/journal/{id}`), which
-  /// mints a fresh signed URL into photoSignedUrl. The detail response
-  /// is what we actually prefill from.
+  /// Two-call dance: LIST returns the id but NOT photoSignedUrl (server
+  /// intentionally omits it from lists — see CLAUDE.md). If an entry
+  /// exists, follow up with detail (`GET /api/journal/{id}`), which
+  /// mints a fresh signed URL. Detail response is what prefills.
   ///
+  /// If no entry exists for the date, fields are RESET so the form
+  /// reflects the empty server state instead of stale prior-day values.
   /// Silent on failure so a flaky network doesn't block journaling.
   Future<void> _loadTodayEntry() async {
     try {
@@ -259,7 +263,7 @@ class _JournalEntryState extends State<JournalEntry>
         if (mounted) setState(() => _isLoading = false);
         return;
       }
-      final listed = await _service.getTodayEntry(jwt);
+      final listed = await _service.getTodayEntry(jwt, date: _entryDate);
       model.JournalEntry? detail;
       if (listed?.journalEntryId != null) {
         detail = await _service.getEntryById(listed!.journalEntryId!, jwt);
@@ -269,12 +273,92 @@ class _JournalEntryState extends State<JournalEntry>
       final source = detail ?? listed;
       if (!mounted) return;
       setState(() {
-        if (source != null) _prefillFrom(source);
+        if (source != null) {
+          _prefillFrom(source);
+        } else {
+          _resetFormFields();
+        }
         _isLoading = false;
       });
+      // Kick off the photo-bytes fetch AFTER the form is up so the user
+      // sees the rest of the prefill immediately; the preview pops in
+      // as soon as the bytes arrive.
+      if (_existingPhotoUrl != null) {
+        unawaited(_fetchExistingPhotoBytes());
+      }
     } catch (_) {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Wipes form fields back to defaults (for stepping to a date with no
+  /// entry). entryDate is NOT touched — caller already set it.
+  void _resetFormFields() {
+    _isPrefilling = true;
+    try {
+      _weight.clear();
+      _thoughts.clear();
+      _thoughtsPrefix = '';
+      for (final c in _measurements.values) {
+        c.clear();
+      }
+      _weightUnit = 'lb';
+      _photo = null;
+      _photoBytes = null;
+      _existingPhotoUrl = null;
+      _existingPhotoBytes = null;
+    } finally {
+      _isPrefilling = false;
+    }
+  }
+
+  /// Fetches the photo bytes for the current [_existingPhotoUrl] so the
+  /// preview can render via Image.memory (no Image.network platform view).
+  /// Silent on failure — the broken-photo state is a null bytes payload
+  /// which the UI treats as "no photo" and falls back to the Add pill.
+  Future<void> _fetchExistingPhotoBytes() async {
+    final url = _existingPhotoUrl;
+    if (url == null) return;
+    try {
+      final res = await http.get(Uri.parse(url));
+      if (!mounted || _existingPhotoUrl != url) return;
+      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+        setState(() => _existingPhotoBytes = res.bodyBytes);
+      } else {
+        // Broken / expired URL — fall back to no-photo state so the
+        // Add Photo pill reappears.
+        setState(() {
+          _existingPhotoUrl = null;
+          _existingPhotoBytes = null;
+        });
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        _existingPhotoUrl = null;
+        _existingPhotoBytes = null;
+      });
+    }
+  }
+
+  /// Step the entry date by [days] (negative = back, positive = forward).
+  /// Future-clamped: stepping past today is disallowed. Flushes any
+  /// pending autosave before swapping dates so unsaved edits on the
+  /// current day aren't lost.
+  Future<void> _stepDate(int days) async {
+    final candidate = _entryDate.add(Duration(days: days));
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    if (candidate.isAfter(today)) return;
+    if (_autosaveTimer?.isActive == true) {
+      _saveNow();
+    }
+    if (!mounted) return;
+    setState(() {
+      _entryDate = candidate;
+      _isLoading = true;
+    });
+    await _loadTodayEntry();
   }
 
   void _prefillFrom(model.JournalEntry e) {
@@ -286,6 +370,8 @@ class _JournalEntryState extends State<JournalEntry>
     try {
       _journalEntryId = e.journalEntryId;
       _existingPhotoUrl = e.photoSignedUrl;
+      // Bytes will be re-fetched against the new URL; null until then.
+      _existingPhotoBytes = null;
       // entryDate from server is YYYY-MM-DD (or YYYY-MM-DDT...); parse
       // the date portion only. Falls back to today on any parse problem.
       final parsed = DateTime.tryParse(e.entryDate);
@@ -404,6 +490,7 @@ class _JournalEntryState extends State<JournalEntry>
       _photo = null;
       _photoBytes = null;
       _existingPhotoUrl = null;
+      _existingPhotoBytes = null;
     });
     if (!hadServerPhoto || entryId == null) return;
     try {
@@ -433,8 +520,21 @@ class _JournalEntryState extends State<JournalEntry>
       lastDate: now,
     );
     if (picked == null || !mounted) return;
-    setState(() => _entryDate = picked);
-    _scheduleAutosave();
+    final normalized = DateTime(picked.year, picked.month, picked.day);
+    if (normalized == DateTime(_entryDate.year, _entryDate.month, _entryDate.day)) {
+      return;
+    }
+    // Flush any pending autosave for the OLD date before swapping. Then
+    // reload from the server for the new date — the picker is a
+    // navigation, not just a "today's entryDate is this" tweak.
+    if (_autosaveTimer?.isActive == true) {
+      _saveNow();
+    }
+    setState(() {
+      _entryDate = normalized;
+      _isLoading = true;
+    });
+    await _loadTodayEntry();
   }
 
   // ───────── Save ─────────
@@ -594,10 +694,15 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   Widget _dateRow() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final canStepForward = _entryDate.isBefore(today);
     return Row(
       children: [
         _sectionTitle('Date'),
         const SizedBox(width: 12),
+        _dateArrow(Icons.chevron_left, true, () => _stepDate(-1)),
+        const SizedBox(width: 6),
         InkWell(
           onTap: _pickDate,
           borderRadius: BorderRadius.circular(20),
@@ -624,21 +729,49 @@ class _JournalEntryState extends State<JournalEntry>
             ),
           ),
         ),
+        const SizedBox(width: 6),
+        _dateArrow(
+          Icons.chevron_right,
+          canStepForward,
+          canStepForward ? () => _stepDate(1) : null,
+        ),
       ],
     );
   }
 
+  Widget _dateArrow(IconData icon, bool enabled, VoidCallback? onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        width: 32,
+        height: 32,
+        decoration: BoxDecoration(
+          color: _inputFill,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        alignment: Alignment.center,
+        child: Icon(
+          icon,
+          size: 20,
+          color: enabled ? Colors.white : Colors.white24,
+        ),
+      ),
+    );
+  }
+
   Widget _photoSection() {
-    final hasPhoto = _photoBytes != null || _existingPhotoUrl != null;
+    // Display priority: freshly-picked photo bytes win; otherwise the
+    // server-loaded bytes (fetched from photoSignedUrl via http). When
+    // _existingPhotoUrl is set but bytes haven't arrived yet we show a
+    // placeholder. "Has photo" for the UI gate includes both populated
+    // bytes AND in-flight URL → shows the box, not the Add pill.
+    final displayBytes = _photoBytes ?? _existingPhotoBytes;
+    final hasPhoto = displayBytes != null || _existingPhotoUrl != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         _sectionTitle('Photo'),
-        // Mutually exclusive: either an "Add Photo" entry point (when
-        // there's nothing attached) OR the photo preview with its ×
-        // delete (when there is). The Add button never sits alongside
-        // the photo — once a photo exists the only operation is delete,
-        // and deleting brings the Add button back.
         if (!hasPhoto)
           _pillButton(
             icon: Icons.add_a_photo,
@@ -653,32 +786,26 @@ class _JournalEntryState extends State<JournalEntry>
               clipBehavior: Clip.none,
               children: [
                 Positioned.fill(
-                  // IgnorePointer wraps the image so any HTML platform-
-                  // view created by Flutter Web's image renderer can't
-                  // steal pointer events from surrounding UI (AppBar X,
-                  // hamburger, etc.). The user's bytes are display-only
-                  // — they don't need to receive taps; only the floating
-                  // × delete button (rendered above this) needs taps.
+                  // IgnorePointer so the image can't capture taps from
+                  // surrounding UI. Image.memory only (no Image.network)
+                  // so Flutter web doesn't spawn an <img> platform view
+                  // that wedges the widget tree on rebuild.
                   child: IgnorePointer(
                     child: ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: _photoBytes != null
-                          ? Image.memory(_photoBytes!, fit: BoxFit.cover)
-                          : Image.network(
-                              _existingPhotoUrl!,
-                              key: ValueKey(_existingPhotoUrl),
-                              fit: BoxFit.cover,
-                              // Orphan/expired URL fallback → drop the URL
-                              // locally, next build shows Add Photo pill.
-                              errorBuilder: (_, __, ___) {
-                                WidgetsBinding.instance
-                                    .addPostFrameCallback((_) {
-                                  if (mounted && _existingPhotoUrl != null) {
-                                    setState(() => _existingPhotoUrl = null);
-                                  }
-                                });
-                                return const SizedBox.shrink();
-                              },
+                      child: displayBytes != null
+                          ? Image.memory(displayBytes, fit: BoxFit.cover)
+                          : Container(
+                              color: _inputFill,
+                              alignment: Alignment.center,
+                              child: const SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.white38,
+                                ),
+                              ),
                             ),
                     ),
                   ),
@@ -904,7 +1031,10 @@ class _JournalEntryState extends State<JournalEntry>
         _sectionTitle('Weight'),
         Row(
           children: [
-            Expanded(
+            // Fixed width — only ever holds 5 chars at most (e.g. 315.5).
+            // No need to span across the whole row.
+            SizedBox(
+              width: 110,
               child: TextField(
                 controller: _weight,
                 focusNode: _weightFocus,

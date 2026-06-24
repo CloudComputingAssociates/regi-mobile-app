@@ -857,7 +857,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  context.read<ChatState>().openOverlay('Journal');
+                  final cs = context.read<ChatState>();
+                  // Toggle: if Journal is already open, close it.
+                  // Otherwise open it. Gives the drawer entry the same
+                  // affordance as the red × in the AppBar.
+                  if (cs.activeOverlay == 'Journal') {
+                    cs.closeOverlay();
+                  } else {
+                    cs.openOverlay('Journal');
+                  }
                 },
               ),
             ],

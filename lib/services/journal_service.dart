@@ -56,24 +56,25 @@ class JournalService {
     return JournalEntry.fromJson(decoded);
   }
 
-  /// GET {base}/journal?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=1 with the
-  /// device's LOCAL calendar date on both ends. Returns the entry for
-  /// today if one exists, else null. Used by the Journal overlay to
+  /// GET {base}/journal?from=YYYY-MM-DD&to=YYYY-MM-DD&limit=1 for the
+  /// given local date (defaults to today). Returns the entry if one
+  /// exists for that date, else null. Used by the Journal overlay to
   /// pre-fill the form so a user who saved on the web sees the same
-  /// state on the phone.
+  /// state on the phone, and to step backward/forward through prior
+  /// days from the date arrows.
   ///
   /// Tolerant to two response shapes for safety:
   ///   • top-level JSON array  → entries[0]
   ///   • `{ "entries": [...] }` wrapper → wrapper.entries[0]
   /// Anything else degrades to null (no crash, no entry).
-  Future<JournalEntry?> getTodayEntry(String jwt) async {
+  Future<JournalEntry?> getTodayEntry(String jwt, {DateTime? date}) async {
     final base = Config.apiBaseUrl;
     if (base.isEmpty) {
       throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
     }
-    final today = _localDateString(DateTime.now());
+    final isoDate = _localDateString(date ?? DateTime.now());
     final res = await _client.get(
-      Uri.parse('$base/journal?from=$today&to=$today&limit=1'),
+      Uri.parse('$base/journal?from=$isoDate&to=$isoDate&limit=1'),
       headers: {
         'Authorization': 'Bearer $jwt',
         'Content-Type': 'application/json',
