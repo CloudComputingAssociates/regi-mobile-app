@@ -606,19 +606,24 @@ class _JournalEntryState extends State<JournalEntry>
         // shaped string like "3/5.jpg" that the server then mis-stores
         // as the URL field. entryDate-based name is unambiguous, has no
         // slashes, and stays unique per (user, date).
+        final pickedBytes = _photoBytes!;
         final updated = await _service.uploadPhoto(
           saved.journalEntryId!,
-          _photoBytes!,
+          pickedBytes,
           'photo_${_wireDate(_entryDate)}.jpg',
           jwt,
         );
-        // Photo is now persisted; promote it from the local "freshly
-        // picked" slot to the server-backed slot so a subsequent ×
-        // tap fires the DELETE path instead of just hiding bytes.
+        // Promote from "just picked" to "server-backed". Move the bytes
+        // into _existingPhotoBytes so the preview keeps rendering after
+        // upload (display path is _photoBytes ?? _existingPhotoBytes;
+        // both null would show the loading spinner instead of the
+        // photo). _existingPhotoUrl is what gates the × → server DELETE
+        // behavior, so the photo also becomes deletable via that path.
         if (mounted) {
           setState(() {
             _photo = null;
             _photoBytes = null;
+            _existingPhotoBytes = pickedBytes;
             _existingPhotoUrl = updated.photoSignedUrl;
           });
         }
