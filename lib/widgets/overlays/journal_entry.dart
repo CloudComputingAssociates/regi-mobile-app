@@ -836,7 +836,44 @@ class _JournalEntryState extends State<JournalEntry>
             ),
           ),
         ),
+        const SizedBox(width: 10),
+        _entryStatusIndicator(),
       ],
+    );
+  }
+
+  /// Status pill next to the date chip:
+  ///   - loading       → spinner placeholder (small)
+  ///   - entry exists  → solid red dot
+  ///   - no entry      → italic "no entry" in muted grey
+  Widget _entryStatusIndicator() {
+    if (_isLoading) {
+      return const SizedBox(
+        width: 12,
+        height: 12,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: Colors.white24,
+        ),
+      );
+    }
+    if (_journalEntryId != null) {
+      return Container(
+        width: 10,
+        height: 10,
+        decoration: const BoxDecoration(
+          color: Color(0xFFFF5F57),
+          shape: BoxShape.circle,
+        ),
+      );
+    }
+    return const Text(
+      'no entry',
+      style: TextStyle(
+        color: Colors.white38,
+        fontSize: 12,
+        fontStyle: FontStyle.italic,
+      ),
     );
   }
 

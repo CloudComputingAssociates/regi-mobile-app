@@ -163,6 +163,14 @@ class _PttButtonState extends State<PttButton> {
                   child: Image.asset(
                     'assets/images/ptt_fingerprint.png',
                     fit: BoxFit.contain,
+                    // Fallback mic icon if the asset fails to load
+                    // (Flutter web asset-bundle quirks, etc.) so the
+                    // button is never an empty disc.
+                    errorBuilder: (_, __, ___) => Icon(
+                      Icons.mic,
+                      size: widget.size * 0.5,
+                      color: Colors.white,
+                    ),
                   ),
                 ),
               ),
