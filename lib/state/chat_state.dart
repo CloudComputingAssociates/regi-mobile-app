@@ -85,9 +85,14 @@ class ChatState extends ChangeNotifier {
   /// Replaces the chat output area while active. Independent from any
   /// bloom that may be on top.
   void openOverlay(String key) {
-    if (_activeOverlay == key) return;
+    debugPrint('[ChatState.openOverlay] called key=$key, before=$_activeOverlay');
+    if (_activeOverlay == key) {
+      debugPrint('[ChatState.openOverlay] early-return (already $key)');
+      return;
+    }
     _activeOverlay = key;
     notifyListeners();
+    debugPrint('[ChatState.openOverlay] done, after=$_activeOverlay');
   }
 
   void closeOverlay() {
