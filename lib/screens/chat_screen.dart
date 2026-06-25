@@ -25,9 +25,9 @@ import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
 import '../widgets/blooms/user_settings.dart';
-import '../widgets/overlays/app_settings.dart';
-import '../widgets/overlays/journal_entry.dart';
 import '../widgets/ptt_button.dart';
+import 'journal_screen.dart';
+import 'settings_screen.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
@@ -634,12 +634,7 @@ class _ChatScreenState extends State<ChatScreen> {
     state.setTalkActive(true);
     state.setListening(true);
 
-    final sink = state.voiceSink;
-    if (sink == null) {
-      state.setCurrentInput('');
-    } else {
-      sink.onStart();
-    }
+    state.setCurrentInput('');
 
     bool ok;
     try {
@@ -685,7 +680,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     if (bytes == null || bytes.isEmpty) {
-      if (state.voiceSink == null) state.clearCurrentInput();
+      state.clearCurrentInput();
       _toast('recorder produced 0 bytes (likely web pcm16 unsupported '
           'or zero-length press)');
       finish();
@@ -707,14 +702,14 @@ class _ChatScreenState extends State<ChatScreen> {
         jwt: jwt,
       );
     } on SpeechError catch (e) {
-      if (state.voiceSink == null) state.clearCurrentInput();
+      state.clearCurrentInput();
       _toast(e.httpStatus == 422
           ? "didn't catch that — try again"
           : 'stt ${e.code}: ${e.detail}');
       finish();
       return;
     } catch (e) {
-      if (state.voiceSink == null) state.clearCurrentInput();
+      state.clearCurrentInput();
       _toast('stt threw: $e');
       finish();
       return;
@@ -723,22 +718,17 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!mounted) return;
     final text = result.transcript.trim();
     if (text.isEmpty) {
-      if (state.voiceSink == null) state.clearCurrentInput();
+      state.clearCurrentInput();
       _toast('stt returned empty transcript (${result.durationSeconds}s audio)');
       finish();
       return;
     }
 
-    final sink = state.voiceSink;
-    if (sink != null) {
-      // Sink path (e.g. Journal overlay): commit the final transcript to
-      // the overlay's field. Overlays own their own display surface; we
-      // do NOT also addMessage (chat-output is hidden anyway).
-      sink.onFinal(text);
-    } else {
-      state.clearCurrentInput();
-      await _sendMessage(text);
-    }
+    // Transcripts always flow into the chat pipeline now — pushed
+    // screens (Journal, Settings) own their own mic and never route
+    // through this handler.
+    state.clearCurrentInput();
+    await _sendMessage(text);
     finish();
   }
 
@@ -767,56 +757,13 @@ class _ChatScreenState extends State<ChatScreen> {
     context.read<ChatState>().toggleTts();
   }
 
-  /// Opaque overlay panel laid over ChatOutput. The Material-backed
-  /// header bar lets InkWell/IconButton register taps cleanly without
-  /// scrounging for a Material ancestor. The opaque dark Container
-  /// background is what stops taps from falling through to ChatOutput
-  /// underneath — do not make it transparent. The leading back arrow
-  /// unfocuses first, then closes the overlay via ChatState so any
-  /// disposed-field FocusNode can't leave a dangling primary focus.
-  Widget _buildOverlayPanel(String title, Widget child) {
-    return Container(
-      color: const Color(0xFF1B1B1B),
-      child: Column(
-        children: [
-          Material(
-            color: const Color(0xFF1B1B1B),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back, color: Colors.white),
-                  tooltip: 'Back',
-                  onPressed: () {
-                    FocusManager.instance.primaryFocus?.unfocus();
-                    context.read<ChatState>().closeOverlay();
-                  },
-                ),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Expanded(child: child),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
-    // PTT comes alive when EITHER an overlay/bloom has registered a
-    // voice sink (e.g. Journal needs dictation regardless of the user's
-    // slider preference), OR the user explicitly chose Voice in the
-    // mode slider for plain chat. See CLAUDE.md.
-    final showPtt =
-        state.voiceSink != null || state.mode == InputMode.voice;
+    // PTT is shown only when the user explicitly chose Voice in the
+    // mode slider. Pushed screens (Journal, Settings) own their own
+    // mic affordances now; they no longer register a global sink.
+    final showPtt = state.mode == InputMode.voice;
     final isToggleMode = state.pttMode == PttMode.tapToggle;
     final screenSize = MediaQuery.of(context).size;
     final pttPos = _clampPttPosition(
@@ -849,18 +796,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {
-                  // Capture-before-pop: reading the provider through
-                  // the ListTile context AFTER Navigator.pop puts the
-                  // read on a mid-deactivation context, which can
-                  // silently drop the notifyListeners and leave the
-                  // overlay slot un-set. Read first, pop second,
-                  // dispatch third.
-                  final cs = context.read<ChatState>();
                   Navigator.pop(context);
-                  // TODO: cs.openOverlay('AddFood') once the AddFood
-                  // overlay widget exists — same dispatch as Enter
-                  // Journal below.
-                  cs; // keep the captured ref alive for the lints
+                  // TODO: push AddFoodScreen onto the root navigator
+                  // — same dispatch as Enter Journal below — once
+                  // that screen exists.
                 },
               ),
               ListTile(
@@ -871,7 +810,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
                 onTap: () {
                   Navigator.pop(context);
-                  context.read<ChatState>().openOverlay('Journal');
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const JournalScreen(),
+                    ),
+                  );
                 },
               ),
             ],
@@ -922,17 +865,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: state.activeOverlay == 'Settings'
-                ? 'Close App Settings'
-                : 'App Settings',
-            onPressed: () {
-              final cs = context.read<ChatState>();
-              if (cs.activeOverlay == 'Settings') {
-                cs.closeOverlay();
-              } else {
-                cs.openOverlay('Settings');
-              }
-            },
+            tooltip: 'App Settings',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const SettingsScreen(),
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -945,47 +883,11 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Column(
             children: [
-              Expanded(
-                // ChatOutput is the permanent bottom layer — mounted
-                // for the app's lifetime, never swapped, never
-                // offstaged. Left-nav overlays (Journal, Settings, …)
-                // are opaque panels laid on top via the conditional
-                // children below; closing an overlay simply unmounts
-                // its panel and ChatOutput becomes visible again
-                // without re-mount, re-subscribe, or rebuild from a
-                // navigation event. ChatInput sits OUTSIDE this Stack
-                // (sibling below the Expanded) so it's never covered
-                // by an overlay and never disturbed by overlay
-                // activity.
-                //
-                // StackFit.expand is REQUIRED: the default
-                // StackFit.loose sizes the Stack to its largest
-                // non-positioned child, and when chat is empty
-                // ChatOutput returns SizedBox.shrink — that collapses
-                // the Stack to 0×0 and any Positioned.fill panel
-                // gets zero-width constraints. (Symptom: "Voice
-                // control" rendered one character per line.)
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    const ChatOutput(),
-                    if (state.activeOverlay == 'Journal')
-                      Positioned.fill(
-                        child: _buildOverlayPanel(
-                          'Journal Entry',
-                          const JournalEntry(),
-                        ),
-                      ),
-                    if (state.activeOverlay == 'Settings')
-                      Positioned.fill(
-                        child: _buildOverlayPanel(
-                          'Settings',
-                          const AppSettings(),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
+              // Journal and Settings are pushed routes on the root
+              // Navigator now (see drawer / AppBar handlers above);
+              // they cover the whole app, not just this Expanded.
+              // Chat is just the chat, all the time.
+              const Expanded(child: ChatOutput()),
               ChatInput(
                 onSend: _sendMessage,
                 onTtsToggle: _handleTtsToggle,

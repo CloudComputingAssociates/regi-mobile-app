@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
 import '../models/ptt_mode.dart';
-import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
@@ -14,9 +13,7 @@ class ChatState extends ChangeNotifier {
   String? _sessionId;
   String _currentInput = '';
   bool _ttsEnabled = true;
-  String? _activeOverlay;
   String? _activeBloom;
-  VoiceSink? _voiceSink;
   PttMode _pttMode = PttMode.holdToTalk;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
@@ -27,25 +24,12 @@ class ChatState extends ChangeNotifier {
   String? get sessionId => _sessionId;
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
-  String? get activeOverlay => _activeOverlay;
   String? get activeBloom => _activeBloom;
-  VoiceSink? get voiceSink => _voiceSink;
   PttMode get pttMode => _pttMode;
 
   void setPttMode(PttMode mode) {
     if (_pttMode == mode) return;
     _pttMode = mode;
-    notifyListeners();
-  }
-
-  /// Registers (or clears) the routing target for the global PTT mic.
-  /// While non-null, ChatScreen pipes transcripts through the sink
-  /// instead of into the chat input AND the PTT button is visible
-  /// regardless of [mode]. Notifies because PTT visibility is now
-  /// derived from sink presence.
-  void setVoiceSink(VoiceSink? s) {
-    if (identical(_voiceSink, s)) return;
-    _voiceSink = s;
     notifyListeners();
   }
 
@@ -73,17 +57,6 @@ class ChatState extends ChangeNotifier {
   void setListening(bool listening) {
     if (_isListening == listening) return;
     _isListening = listening;
-    notifyListeners();
-  }
-
-  void openOverlay(String key) {
-    _activeOverlay = key;
-    notifyListeners();
-  }
-
-  void closeOverlay() {
-    if (_activeOverlay == null) return;
-    _activeOverlay = null;
     notifyListeners();
   }
 

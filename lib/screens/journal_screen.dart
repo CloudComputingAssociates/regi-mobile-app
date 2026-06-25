@@ -6,62 +6,65 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
-import '../../models/journal_entry.dart' as model;
-import '../../services/auth_service.dart';
-import '../../services/journal_service.dart';
-import '../../services/voice_sink.dart';
-import '../../state/chat_state.dart';
+import '../models/journal_entry.dart' as model;
+import '../services/audio_recorder.dart';
+import '../services/auth_service.dart';
+import '../services/journal_service.dart';
+import '../services/stt_service.dart';
 
-/// Left-nav overlay: create a journal entry (date, optional photo,
-/// thoughts, weight, optional measurements). Replaces the chat output
-/// area while open. Submits via [JournalService]; photo uploads as a
-/// separate multipart PUT after the entry id exists.
+/// Standalone Journal screen pushed onto the root Navigator. Owns the
+/// date / Reflective Thoughts / weight / photo / measurements / clear-
+/// entry form, with autosave (1.5s debounce, photo immediate, voice
+/// "save" command immediate). The AppBar's auto-supplied leading ←
+/// arrow is the sole close affordance.
 ///
-/// Voice is routed via the global [VoiceSink] — there is NO inline mic
-/// here. On mount the overlay registers a sink; ChatScreen's PTT
-/// visibility derives from `voiceSink != null`, so the talk button comes
-/// alive automatically when this overlay opens (regardless of the
-/// slider's text/voice setting). On dispose the sink is cleared and PTT
-/// reverts to the slider preference.
-///
-/// Voice transport is BATCH — ChatScreen records during the hold and
-/// POSTs the WAV blob on release, so the sink's [VoiceSink.onPartial]
-/// never fires here. [VoiceSink.onFinal] is the sole text-mutation
-/// point. The partial callback is retained for the contract (a future
-/// streaming consumer can wire it) but ChatScreen will not call it.
+/// VOICE: this screen owns its own [AudioRecorderService] +
+/// [SttService] and a bottom-anchored hold-to-talk mic; transcripts
+/// flow through [_onVoiceFinal] directly into the Thoughts
+/// controller. Nothing global is touched.
 ///
 /// SAVE: there is no manual Save UI. Every form mutation schedules a
 /// debounced (1.5s) POST upsert; photo pick fires an immediate save
 /// (so the photo upload can run against the resulting entry id); a
-/// voice utterance of "save" / "save it" / "save entry" is intercepted
-/// in onFinal as a command and triggers an immediate save instead of
-/// appending to Thoughts. Clearing thoughts persists as `""` on the
-/// next autosave.
-class JournalEntry extends StatefulWidget {
-  const JournalEntry({super.key});
+/// voice utterance of "save" / "save it" / "save entry" is
+/// intercepted in onFinal as a command and triggers an immediate save
+/// instead of appending to Thoughts. Clearing thoughts persists as
+/// `""` on the next autosave.
+class JournalScreen extends StatefulWidget {
+  const JournalScreen({super.key});
 
   @override
-  State<JournalEntry> createState() => _JournalEntryState();
+  State<JournalScreen> createState() => _JournalScreenState();
 }
 
-class _JournalEntryState extends State<JournalEntry>
+class _JournalScreenState extends State<JournalScreen>
     with WidgetsBindingObserver {
   // Visual tokens — mirror UserSettings.
   static const Color _inputFill = Color(0xFF555555);
-
-  // Captured in initState so dispose can clear the voice sink without
-  // touching the (possibly already-unmounted) BuildContext. Storing
-  // the notifier itself is the correct pattern for Provider lookups
-  // that need to run during teardown.
-  late final ChatState _chatState;
+  // Green glow drawn around the Reflective Thoughts field whenever it
+  // is NOT focused — visual cue that this is the screen's single
+  // voice-input target. When the user taps in and the keyboard rises,
+  // focus is taken and the glow disappears; tapping away or dismissing
+  // the keyboard restores the glow.
+  static const Color _voiceGlow = Color(0xFF3DDC84);
 
   final JournalService _service = JournalService();
+  // Voice capture lives entirely inside this screen and writes
+  // straight into the Thoughts controller via [_onVoiceFinal] — no
+  // global state is touched, so teardown can never fire a cross-tree
+  // notify and there's no aiming/registration to manage.
+  final AudioRecorderService _recorder = AudioRecorderService();
+  final SttService _stt = SttService();
+  bool _isListening = false;
+
   final TextEditingController _thoughts = TextEditingController();
   final TextEditingController _weight = TextEditingController();
-  // FocusNodes so we can flush any pending debounced autosave the
-  // moment the user leaves a numeric field. The thoughts field doesn't
-  // need one since dictation/typing already schedules autosave on
-  // every character.
+  // Reflective Thoughts focus drives both the autosave-on-blur path
+  // (via the same listener used for weight/measurements is NOT needed
+  // — typing already schedules autosave per character) AND the
+  // green-glow visual: the wrapper repaints whenever focus changes,
+  // and !hasFocus is the entire glow predicate.
+  final FocusNode _thoughtsFocus = FocusNode();
   final FocusNode _weightFocus = FocusNode();
   late final Map<String, FocusNode> _measurementFocus = {
     for (final s in _measurementSpec) s[1]: FocusNode(),
@@ -88,8 +91,7 @@ class _JournalEntryState extends State<JournalEntry>
   // Photo signed URL returned by the GET for today's entry. We immediately
   // fetch its bytes into [_existingPhotoBytes] and render via Image.memory
   // — NOT Image.network — so Flutter web doesn't spawn an <img> platform
-  // view that can wedge the widget tree and block surrounding taps
-  // (notably the AppBar X close).
+  // view that can wedge the widget tree and block surrounding taps.
   String? _existingPhotoUrl;
   Uint8List? _existingPhotoBytes;
   // Server id of today's entry, captured from prefill OR from the first
@@ -136,26 +138,20 @@ class _JournalEntryState extends State<JournalEntry>
   @override
   void initState() {
     super.initState();
-    _chatState = context.read<ChatState>();
     WidgetsBinding.instance.addObserver(this);
     _thoughts.addListener(_onFormMutated);
     _weight.addListener(_onFormMutated);
+    // Repaint the Thoughts wrapper on every focus change so the green
+    // glow toggles atomically with the cursor's presence.
+    _thoughtsFocus.addListener(() {
+      if (mounted) setState(() {});
+    });
     _weightFocus.addListener(() => _flushOnBlur(_weightFocus));
     for (final entry in _measurements.entries) {
       entry.value.addListener(_onFormMutated);
       _measurementFocus[entry.key]!
           .addListener(() => _flushOnBlur(_measurementFocus[entry.key]!));
     }
-    _chatState.setVoiceSink(VoiceSink(
-      label: 'Journal',
-      onStart: () => _thoughtsPrefix = _thoughts.text,
-      // Unused under batch transport — retained for the VoiceSink
-      // contract (a future streaming consumer could call it).
-      onPartial: (c) => _setThoughtsText(
-        _thoughtsPrefix.isEmpty ? c : '$_thoughtsPrefix $c',
-      ),
-      onFinal: _onVoiceFinal,
-    ));
     unawaited(_loadTodayEntry());
   }
 
@@ -181,10 +177,97 @@ class _JournalEntryState extends State<JournalEntry>
     }
   }
 
-  /// Called by ChatScreen with the final transcript from a PTT hold.
-  /// If the utterance is a save command, fire an immediate save (don't
-  /// append it to Thoughts — the user wouldn't want their command word
-  /// shoved into their journal). Otherwise append + schedule autosave.
+  // ───────── Voice capture (hold-to-talk, hardwired to Thoughts) ─────────
+
+  /// Starts an audio capture. Drops focus FIRST so any field cursor
+  /// (and the soft keyboard, on mobile) is gone — that re-shows the
+  /// green glow on Thoughts and keeps the dictation flow unobstructed.
+  /// Snapshots the existing Thoughts text into [_thoughtsPrefix] so
+  /// the eventual onFinal append composes with what's already there.
+  /// On mic failure, toast and reset [_isListening] without ever
+  /// leaving the button "held".
+  Future<void> _startCapture() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    _thoughtsPrefix = _thoughts.text;
+    setState(() => _isListening = true);
+    bool ok;
+    try {
+      ok = await _recorder.start();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isListening = false);
+      _toast('mic start threw: $e');
+      return;
+    }
+    if (!ok && mounted) {
+      setState(() => _isListening = false);
+      _toast('mic blocked (permission denied or device unavailable)');
+    }
+  }
+
+  /// Stops the capture, posts the WAV to STT, and dispatches the
+  /// transcript to [_onVoiceFinal] which appends to Thoughts (or
+  /// triggers an immediate save if the spoken phrase is a "save"
+  /// command). Toast-and-bail on any failure; final unfocus keeps
+  /// the green glow visible after the press releases.
+  Future<void> _stopCapture() async {
+    if (!_isListening) return;
+    // Capture the AuthService BEFORE any awaits so the JWT fetch
+    // below doesn't reach through a possibly-stale BuildContext.
+    final auth = context.read<AuthService>();
+    setState(() => _isListening = false);
+
+    Uint8List? bytes;
+    try {
+      bytes = await _recorder.stop();
+    } catch (e) {
+      _toast('mic stop threw: $e');
+      return;
+    }
+    if (bytes == null || bytes.isEmpty) {
+      _toast('recorder produced 0 bytes (likely web pcm16 unsupported '
+          'or zero-length press)');
+      return;
+    }
+
+    final jwt = await auth.getAccessToken();
+    if (jwt == null) {
+      _toast('stt: not authenticated');
+      return;
+    }
+
+    TranscribeResult result;
+    try {
+      result = await _stt.transcribe(
+        audio: bytes,
+        format: _recorder.format,
+        jwt: jwt,
+      );
+    } on SpeechError catch (e) {
+      _toast(e.httpStatus == 422
+          ? "didn't catch that — try again"
+          : 'stt ${e.code}: ${e.detail}');
+      return;
+    } catch (e) {
+      _toast('stt threw: $e');
+      return;
+    }
+
+    if (!mounted) return;
+    final text = result.transcript.trim();
+    if (text.isEmpty) {
+      _toast('stt returned empty transcript (${result.durationSeconds}s audio)');
+      return;
+    }
+    _onVoiceFinal(text);
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
+
+  /// Called by [_stopCapture] with the final transcript from a PTT
+  /// hold. If the utterance is a save command, fire an immediate
+  /// save (don't append it to Thoughts — the user wouldn't want
+  /// their command word shoved into their journal). Otherwise append
+  /// + schedule autosave.
   ///
   /// In all cases, defensively drop focus from any TextField afterward.
   /// PTT writing to a controller can leave a TextField in a state where
@@ -465,6 +548,7 @@ class _JournalEntryState extends State<JournalEntry>
     _autosaveTimer?.cancel();
     _thoughts.dispose();
     _weight.dispose();
+    _thoughtsFocus.dispose();
     _weightFocus.dispose();
     for (final c in _measurements.values) {
       c.dispose();
@@ -473,22 +557,12 @@ class _JournalEntryState extends State<JournalEntry>
       f.dispose();
     }
     _service.dispose();
-    // Release any field that still holds focus BEFORE the FocusNodes
-    // above are disposed-out (above) and BEFORE super.dispose() — a
-    // dangling primaryFocus on a dead node was the original
-    // chat-input wedge symptom. Then clear the global voice sink via
-    // the captured notifier reference so PTT visibility falls back to
-    // the slider preference.
-    //
-    // The setVoiceSink clear is DEFERRED to the next frame: this
-    // dispose runs because closeOverlay rebuilt ChatScreen, so we're
-    // mid-build. Calling notifyListeners synchronously here would be
-    // a re-entrant markNeedsBuild during build and wedges the chat
-    // surface. Capturing the notifier into a local lets the closure
-    // run safely after the dispose / build pair has fully unwound.
+    unawaited(_recorder.dispose());
+    _stt.dispose();
+    // Release any field that still holds focus BEFORE super.dispose()
+    // — a dangling primaryFocus on a now-dead node was the original
+    // chat-input wedge symptom.
     FocusManager.instance.primaryFocus?.unfocus();
-    final cs = _chatState;
-    WidgetsBinding.instance.addPostFrameCallback((_) => cs.setVoiceSink(null));
     super.dispose();
   }
 
@@ -659,8 +733,7 @@ class _JournalEntryState extends State<JournalEntry>
       }
       if (!mounted) return;
       setState(() => _isSaving = false);
-      // Autosave is silent — no chat message, no overlay close. Close
-      // is only via the red × in the AppBar.
+      // Autosave is silent — no chat message, no overlay close.
     } on JournalException catch (e) {
       if (!mounted) return;
       setState(() => _isSaving = false);
@@ -677,9 +750,8 @@ class _JournalEntryState extends State<JournalEntry>
     }
   }
 
-  /// Floats a short message above the overlay/chat-input. Used in place
-  /// of the inline `_saveError` slot we used to show below the Save
-  /// button, since Save now lives in the AppBar.
+  /// Floats a short message above the screen body. Used for save / clear
+  /// / photo-pick feedback.
   void _toast(String msg) {
     if (!mounted) return;
     final m = ScaffoldMessenger.of(context);
@@ -716,32 +788,105 @@ class _JournalEntryState extends State<JournalEntry>
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return const Center(
-        child: CircularProgressIndicator(color: Color(0xFFF2B33D)),
-      );
-    }
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _dateRow(),
-          const SizedBox(height: 18),
-          _thoughtsSection(),
-          const SizedBox(height: 18),
-          _weightSection(),
-          const SizedBox(height: 18),
-          _photoSection(),
-          const SizedBox(height: 8),
-          _measurementsExpander(),
-          // TODO(glp1): when user setting 'Track GLP-1' ships, render a
-          // dose field here.
-          const SizedBox(height: 24),
-          _deleteEntryButton(),
-          const SizedBox(height: 12),
-        ],
+    return Scaffold(
+      backgroundColor: const Color(0xFF1B1B1B),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1B1B1B),
+        foregroundColor: Colors.white,
+        title: const Text('Journal Entry'),
       ),
+      body: _isLoading
+          ? const Center(
+              child: CircularProgressIndicator(color: Color(0xFFF2B33D)),
+            )
+          : Stack(
+              children: [
+                // Bottom padding leaves clearance so the form's last
+                // row never sits underneath the floating mic.
+                SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 20, 20, 120),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _dateRow(),
+                      const SizedBox(height: 18),
+                      _thoughtsSection(),
+                      const SizedBox(height: 18),
+                      _weightSection(),
+                      const SizedBox(height: 18),
+                      _photoSection(),
+                      const SizedBox(height: 8),
+                      _measurementsExpander(),
+                      // TODO(glp1): when user setting 'Track GLP-1' ships, render a
+                      // dose field here.
+                      const SizedBox(height: 24),
+                      _deleteEntryButton(),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 24,
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _thoughtsMicButton(),
+                  ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  /// Bottom-anchored hold-to-talk mic. NOT FloatingActionButton — FAB
+  /// tap semantics are wrong for hold-to-talk. Uses a raw [Listener]
+  /// so onPointerDown / onPointerUp / onPointerCancel map directly
+  /// to start/stop with no gesture-arena guessing. The mic always
+  /// targets Reflective Thoughts; there is no aiming or per-field
+  /// voice target.
+  Widget _thoughtsMicButton() {
+    const size = 72.0;
+    final core = AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: _isListening ? _voiceGlow : const Color(0xFF2196F3),
+        border: Border.all(
+          color: _isListening ? _voiceGlow : Colors.white,
+          width: 3,
+        ),
+        boxShadow: _isListening
+            ? [
+                BoxShadow(
+                  color: _voiceGlow.withValues(alpha: 0.65),
+                  blurRadius: 22,
+                  spreadRadius: 4,
+                ),
+              ]
+            : [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.25),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+      ),
+      alignment: Alignment.center,
+      child: Icon(
+        Icons.mic,
+        color: Colors.white,
+        size: size * 0.45,
+      ),
+    );
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (_) => _startCapture(),
+      onPointerUp: (_) => _stopCapture(),
+      onPointerCancel: (_) => _stopCapture(),
+      child: core,
     );
   }
 
@@ -779,7 +924,7 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   /// Wipes the local form AND (if an entry exists server-side) deletes
-  /// the row. Stays in the overlay so the user can start a fresh entry
+  /// the row. Stays on the screen so the user can start a fresh entry
   /// for the same day. Toasts a confirmation. No modal confirm — per
   /// user request, the action is one-tap.
   Future<void> _clearEntry() async {
@@ -1004,9 +1149,7 @@ class _JournalEntryState extends State<JournalEntry>
 
   /// Fullscreen-ish dialog displaying the photo at full size with a
   /// floating red × in the top-right to dismiss. Used for both
-  /// freshly-picked and server-loaded photo bytes. Lives on the root
-  /// Navigator (default) — independent of the overlay panel, the
-  /// same way blooms are.
+  /// freshly-picked and server-loaded photo bytes.
   void _openPhotoZoom(Uint8List bytes) {
     showDialog<void>(
       context: context,
@@ -1060,10 +1203,7 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   /// Opens a small bloom-styled chooser (yellow-bordered panel) above
-  /// the Journal overlay so the user can pick between camera and
-  /// gallery. Inline rather than a global bloom because it's tightly
-  /// scoped to "where does the next photo come from" — no need to
-  /// register it via ChatState.openBloom.
+  /// the journal screen so the user can pick between camera and gallery.
   Future<void> _openAddPhotoBloom() async {
     final source = await showDialog<ImageSource>(
       context: context,
@@ -1148,6 +1288,11 @@ class _JournalEntryState extends State<JournalEntry>
 
   Widget _thoughtsSection() {
     final hasText = _thoughts.text.isNotEmpty;
+    // The single voice-target indicator. Glows when the field is NOT
+    // focused (i.e. when the user could press-and-hold to dictate);
+    // disappears the moment focus arrives so the cursor and the glow
+    // are never on screen simultaneously.
+    final showGlow = !_thoughtsFocus.hasFocus;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1162,23 +1307,39 @@ class _JournalEntryState extends State<JournalEntry>
             ),
           ],
         ),
-        TextField(
-          controller: _thoughts,
-          minLines: 3,
-          maxLines: 6,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: _inputFill,
-            hintText: 'How did today feel? Hold the talk button to dictate.',
-            hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 10,
-            ),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
+        Container(
+          decoration: showGlow
+              ? BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: _voiceGlow, width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: _voiceGlow.withValues(alpha: 0.5),
+                      blurRadius: 8,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                )
+              : null,
+          child: TextField(
+            controller: _thoughts,
+            focusNode: _thoughtsFocus,
+            minLines: 3,
+            maxLines: 6,
+            style: const TextStyle(color: Colors.white),
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: _inputFill,
+              hintText: 'How did today feel? Hold the talk button to dictate.',
+              hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 10,
+              ),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide.none,
+              ),
             ),
           ),
         ),
@@ -1342,7 +1503,8 @@ class _JournalEntryState extends State<JournalEntry>
   }
 
   Widget _measurementsExpander() {
-    // Strip ExpansionTile's default dividers so it blends with the bloom.
+    // Strip ExpansionTile's default dividers so it blends with the
+    // surrounding form.
     final stripped = Theme.of(context).copyWith(
       dividerColor: Colors.transparent,
     );
@@ -1471,4 +1633,3 @@ class _JournalEntryState extends State<JournalEntry>
     );
   }
 }
-
