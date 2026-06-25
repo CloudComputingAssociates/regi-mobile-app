@@ -67,6 +67,13 @@ class _JournalScreenState extends State<JournalScreen>
   Offset? _micPosition;
 
   final TextEditingController _thoughts = TextEditingController();
+  // ScrollController so we can programmatically jump the Thoughts
+  // field's INTERNAL scroll to the bottom after a voice append —
+  // when the field is unfocused, moving the cursor to text.length
+  // does not by itself scroll the visible viewport (Flutter only
+  // auto-scrolls-into-view when focused). Without this, new
+  // dictation would land below the visible window.
+  final ScrollController _thoughtsScroll = ScrollController();
   final TextEditingController _weight = TextEditingController();
   // Reflective Thoughts focus drives both the autosave-on-blur path
   // (via the same listener used for weight/measurements is NOT needed
@@ -306,8 +313,22 @@ class _JournalScreenState extends State<JournalScreen>
     _setThoughtsText(combined);
     _thoughtsPrefix = combined;
     FocusManager.instance.primaryFocus?.unfocus();
+    _scrollThoughtsToBottom();
     // The controller-text change above also fires _onFormMutated which
     // schedules autosave — no explicit call needed here.
+  }
+
+  /// Pin the Thoughts field's internal scroll to the newest content
+  /// after a programmatic text mutation (voice append). Manual
+  /// typing already auto-scrolls the cursor into view because the
+  /// field is focused; voice runs unfocused, so we have to do this
+  /// ourselves. Post-frame so layout has settled by the time we ask
+  /// for maxScrollExtent.
+  void _scrollThoughtsToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_thoughtsScroll.hasClients) return;
+      _thoughtsScroll.jumpTo(_thoughtsScroll.position.maxScrollExtent);
+    });
   }
 
   bool _isSaveCommand(String text) {
@@ -566,6 +587,7 @@ class _JournalScreenState extends State<JournalScreen>
     // close-tapped mid-typing without leaving the field."
     _autosaveTimer?.cancel();
     _thoughts.dispose();
+    _thoughtsScroll.dispose();
     _weight.dispose();
     _thoughtsFocus.dispose();
     _weightFocus.dispose();
@@ -1359,15 +1381,29 @@ class _JournalScreenState extends State<JournalScreen>
           ],
         ),
         Container(
+          // Layered halo: a tight bright inner ring, a broader
+          // medium-alpha bloom, then a wide white-tinted fade so the
+          // glow radiates out and dissolves into the dark background
+          // instead of cutting off sharply.
           decoration: showGlow
               ? BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
                   border: Border.all(color: _voiceGlow, width: 2),
                   boxShadow: [
                     BoxShadow(
-                      color: _voiceGlow.withValues(alpha: 0.5),
-                      blurRadius: 8,
-                      spreadRadius: 1,
+                      color: _voiceGlow.withValues(alpha: 0.85),
+                      blurRadius: 18,
+                      spreadRadius: 2,
+                    ),
+                    BoxShadow(
+                      color: _voiceGlow.withValues(alpha: 0.45),
+                      blurRadius: 36,
+                      spreadRadius: 6,
+                    ),
+                    BoxShadow(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      blurRadius: 56,
+                      spreadRadius: 10,
                     ),
                   ],
                 )
@@ -1375,7 +1411,14 @@ class _JournalScreenState extends State<JournalScreen>
           child: TextField(
             controller: _thoughts,
             focusNode: _thoughtsFocus,
-            minLines: 3,
+            scrollController: _thoughtsScroll,
+            // Fixed height — do NOT grow as content accumulates.
+            // minLines == maxLines locks the visible viewport at 6
+            // lines and forces the field's INTERNAL scrollbar to
+            // handle overflow. New content (typed or dictated) lands
+            // at the bottom and earlier lines push up via
+            // [_scrollThoughtsToBottom] after each mutation.
+            minLines: 6,
             maxLines: 6,
             style: const TextStyle(color: Colors.white),
             decoration: InputDecoration(
