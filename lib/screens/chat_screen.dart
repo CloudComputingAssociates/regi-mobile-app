@@ -24,6 +24,7 @@ import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
+import '../utils/ptt_layout.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
 import 'journal_screen.dart';
@@ -86,18 +87,11 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _skipClearPrefKey = 'clear_confirm_skip';
   bool _skipClearConfirm = false;
 
-  // PTT button relocation: parent owns position + persistence; the button
-  // only reports drag deltas upward.
-  static const _pttOffsetXKey = 'ptt_offset_x';
-  static const _pttOffsetYKey = 'ptt_offset_y';
-  static const _pttButtonSize = 90.0;
+  // PTT button relocation: parent owns position + persistence; the
+  // button only reports drag deltas upward. Layout constants + the
+  // shared SharedPreferences keys live in [PttLayout] so other screens
+  // (Journal, etc.) render their mic disc at the same coordinates.
   static const _pttDragInactivityTimeout = Duration(seconds: 5);
-  static const _pttDefaultBottomInset = 210.0;
-  // Approximate height of the chat-input row (two rows of buttons +
-  // text field + padding). PTT is clamped so it cannot be positioned
-  // over this zone, otherwise its 90px disc covers the mute / mode /
-  // talk controls and steals their taps. Slightly generous to be safe.
-  static const _chatInputApproxHeight = 160.0;
 
   Offset? _pttPosition;
   bool _pttDragMode = false;
@@ -127,13 +121,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadPttPosition() async {
-    final prefs = await SharedPreferences.getInstance();
-    final x = prefs.getDouble(_pttOffsetXKey);
-    final y = prefs.getDouble(_pttOffsetYKey);
-    if (!mounted) return;
-    if (x != null && y != null) {
-      setState(() => _pttPosition = Offset(x, y));
-    }
+    final saved = await PttLayout.loadSavedPosition();
+    if (!mounted || saved == null) return;
+    setState(() => _pttPosition = saved);
   }
 
   @override
@@ -149,25 +139,16 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  Offset _defaultPttPosition(Size screen) {
-    return Offset(
-      (screen.width - _pttButtonSize) / 2,
-      screen.height - _pttDefaultBottomInset - _pttButtonSize,
-    );
-  }
+  Offset _defaultPttPosition(Size screen) =>
+      PttLayout.defaultPosition(screen);
 
-  Offset _clampPttPosition(Offset pos, Size screen) {
-    final maxX = (screen.width - _pttButtonSize).clamp(0.0, double.infinity);
-    // Reserve the bottom strip for the chat-input row — PTT cannot be
-    // dragged or default-positioned over it, so the mute / mode / talk
-    // controls stay clickable.
-    final maxY = (screen.height - _chatInputApproxHeight - _pttButtonSize)
-        .clamp(0.0, double.infinity);
-    return Offset(
-      pos.dx.clamp(0.0, maxX),
-      pos.dy.clamp(0.0, maxY),
-    );
-  }
+  /// Chat reserves the chat-input row so PTT can't cover the mute /
+  /// mode / talk controls.
+  Offset _clampPttPosition(Offset pos, Size screen) => PttLayout.clamp(
+        pos,
+        screen,
+        reservedBottom: PttLayout.chatInputApproxHeight,
+      );
 
   void _armPttDragTimer() {
     _pttDragTimer?.cancel();
@@ -190,11 +171,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _persistPttPosition(Offset pos) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_pttOffsetXKey, pos.dx);
-    await prefs.setDouble(_pttOffsetYKey, pos.dy);
-  }
+  Future<void> _persistPttPosition(Offset pos) => PttLayout.savePosition(pos);
 
   void _handlePttDragMove(Offset delta) {
     _armPttDragTimer();

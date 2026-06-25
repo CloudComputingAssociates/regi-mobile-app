@@ -11,6 +11,7 @@ import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
 import '../services/journal_service.dart';
 import '../services/stt_service.dart';
+import '../utils/ptt_layout.dart';
 
 /// Standalone Journal screen pushed onto the root Navigator. Owns the
 /// date / Reflective Thoughts / weight / photo / measurements / clear-
@@ -41,12 +42,13 @@ class _JournalScreenState extends State<JournalScreen>
     with WidgetsBindingObserver {
   // Visual tokens — mirror UserSettings.
   static const Color _inputFill = Color(0xFF555555);
-  // Green glow drawn around the Reflective Thoughts field whenever it
-  // is NOT focused — visual cue that this is the screen's single
-  // voice-input target. When the user taps in and the keyboard rises,
-  // focus is taken and the glow disappears; tapping away or dismissing
-  // the keyboard restores the glow.
-  static const Color _voiceGlow = Color(0xFF3DDC84);
+  // Glow drawn around the Reflective Thoughts field whenever it is
+  // NOT focused — visual cue that this is the screen's single
+  // voice-input target. Same blue as the PTT disc so the eye reads
+  // "this field is what that button talks to". When the user taps in
+  // and the keyboard rises, focus is taken and the glow disappears;
+  // tapping away or dismissing the keyboard restores it.
+  static const Color _voiceGlow = Color(0xFF2196F3);
 
   final JournalService _service = JournalService();
   // Voice capture lives entirely inside this screen and writes
@@ -56,6 +58,13 @@ class _JournalScreenState extends State<JournalScreen>
   final AudioRecorderService _recorder = AudioRecorderService();
   final SttService _stt = SttService();
   bool _isListening = false;
+
+  // Mic disc position is loaded from the SAME SharedPreferences keys
+  // ChatScreen uses (via [PttLayout]) so the disc lands where the
+  // user last placed it on chat — the illusion of one continuous
+  // floating button across screens. Null until prefs load; build
+  // falls back to [PttLayout.defaultPosition].
+  Offset? _micPosition;
 
   final TextEditingController _thoughts = TextEditingController();
   final TextEditingController _weight = TextEditingController();
@@ -153,6 +162,16 @@ class _JournalScreenState extends State<JournalScreen>
           .addListener(() => _flushOnBlur(_measurementFocus[entry.key]!));
     }
     unawaited(_loadTodayEntry());
+    unawaited(_loadMicPosition());
+  }
+
+  /// Reads the user's last-dragged mic position from the shared
+  /// SharedPreferences keys ChatScreen writes to, so the disc lands
+  /// where it was on chat — visual continuity across screens.
+  Future<void> _loadMicPosition() async {
+    final saved = await PttLayout.loadSavedPosition();
+    if (!mounted || saved == null) return;
+    setState(() => _micPosition = saved);
   }
 
   /// Fires an immediate save when a numeric field loses focus. Catches
@@ -825,60 +844,92 @@ class _JournalScreenState extends State<JournalScreen>
                     ],
                   ),
                 ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  bottom: 24,
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: _thoughtsMicButton(),
-                  ),
+                Builder(
+                  builder: (ctx) {
+                    final screen = MediaQuery.of(ctx).size;
+                    final pos = PttLayout.clamp(
+                      _micPosition ?? PttLayout.defaultPosition(screen),
+                      screen,
+                    );
+                    return Positioned(
+                      left: pos.dx,
+                      top: pos.dy,
+                      child: _thoughtsMicButton(),
+                    );
+                  },
                 ),
               ],
             ),
     );
   }
 
-  /// Bottom-anchored hold-to-talk mic. NOT FloatingActionButton — FAB
-  /// tap semantics are wrong for hold-to-talk. Uses a raw [Listener]
-  /// so onPointerDown / onPointerUp / onPointerCancel map directly
-  /// to start/stop with no gesture-arena guessing. The mic always
-  /// targets Reflective Thoughts; there is no aiming or per-field
-  /// voice target.
+  /// Hold-to-talk mic, rendered byte-for-byte the same as the chat
+  /// screen's [PttButton] — same size, blue fill, white border,
+  /// black idle shadow, fingerprint asset with mic fallback, amber
+  /// press-glow and 0.95 press-scale. Positioned at the same
+  /// coordinates ChatScreen's PTT was last dragged to (via
+  /// [PttLayout]) so it feels like one continuous floating button
+  /// across screens. NOT FloatingActionButton — FAB tap semantics
+  /// are wrong for hold-to-talk. Raw [Listener] so onPointerDown /
+  /// Up / Cancel map directly to start/stop with no gesture-arena
+  /// guessing. The mic always targets Reflective Thoughts; there is
+  /// no per-field aiming.
   Widget _thoughtsMicButton() {
-    const size = 72.0;
+    const size = PttLayout.buttonSize;
+    // Same amber as the chat PTT press glow — visual continuity with
+    // the chat button is the point. The Reflective Thoughts green
+    // glow is a separate, focus-driven cue and stays green.
+    const pressGlow = Color(0xFFF2B33D);
     final core = AnimatedContainer(
-      duration: const Duration(milliseconds: 120),
+      duration: const Duration(milliseconds: 80),
       width: size,
       height: size,
+      transform: Matrix4.identity()..scaleByDouble(
+            _isListening ? 0.95 : 1.0,
+            _isListening ? 0.95 : 1.0,
+            1.0,
+            1.0,
+          ),
+      transformAlignment: Alignment.center,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: _isListening ? _voiceGlow : const Color(0xFF2196F3),
+        color: const Color(0xFF2196F3),
+        boxShadow: [
+          if (_isListening)
+            BoxShadow(
+              color: pressGlow.withValues(alpha: 0.85),
+              blurRadius: 24,
+              spreadRadius: 4,
+            )
+          else
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.25),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+        ],
         border: Border.all(
-          color: _isListening ? _voiceGlow : Colors.white,
+          color: _isListening ? pressGlow : Colors.white,
           width: 3,
         ),
-        boxShadow: _isListening
-            ? [
-                BoxShadow(
-                  color: _voiceGlow.withValues(alpha: 0.65),
-                  blurRadius: 22,
-                  spreadRadius: 4,
-                ),
-              ]
-            : [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.25),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
       ),
       alignment: Alignment.center,
-      child: Icon(
-        Icons.mic,
-        color: Colors.white,
-        size: size * 0.45,
+      child: ClipOval(
+        child: Padding(
+          padding: const EdgeInsets.all(size * 0.1),
+          child: Image.asset(
+            'assets/images/ptt_fingerprint.png',
+            fit: BoxFit.contain,
+            // Fallback to a mic glyph if the asset fails to load
+            // (Flutter web asset-bundle quirks etc.) so the button
+            // is never an empty disc.
+            errorBuilder: (_, __, ___) => const Icon(
+              Icons.mic,
+              size: size * 0.5,
+              color: Colors.white,
+            ),
+          ),
+        ),
       ),
     );
     return Listener(
