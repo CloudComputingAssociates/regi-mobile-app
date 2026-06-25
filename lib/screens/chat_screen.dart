@@ -927,9 +927,17 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           IconButton(
             icon: const Icon(Icons.settings),
-            tooltip: 'App Settings',
-            onPressed: () =>
-                context.read<ChatState>().openOverlay('Settings'),
+            tooltip: state.activeOverlay == 'Settings'
+                ? 'Close App Settings'
+                : 'App Settings',
+            onPressed: () {
+              final cs = context.read<ChatState>();
+              if (cs.activeOverlay == 'Settings') {
+                cs.closeOverlay();
+              } else {
+                cs.openOverlay('Settings');
+              }
+            },
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -954,7 +962,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 // (sibling below the Expanded) so it's never covered
                 // by an overlay and never disturbed by overlay
                 // activity.
+                //
+                // StackFit.expand is REQUIRED: the default
+                // StackFit.loose sizes the Stack to its largest
+                // non-positioned child, and when chat is empty
+                // ChatOutput returns SizedBox.shrink — that collapses
+                // the Stack to 0×0 and any Positioned.fill panel
+                // gets zero-width constraints. (Symptom: "Voice
+                // control" rendered one character per line.)
                 child: Stack(
+                  fit: StackFit.expand,
                   children: [
                     const ChatOutput(),
                     if (state.activeOverlay == 'Journal')
