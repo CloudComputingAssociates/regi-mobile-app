@@ -12,6 +12,7 @@ import '../services/auth_service.dart';
 import '../services/journal_service.dart';
 import '../services/stt_service.dart';
 import '../utils/ptt_layout.dart';
+import '../widgets/journal_calendar_picker.dart';
 
 /// Standalone Journal screen pushed onto the root Navigator. Owns the
 /// date / Reflective Thoughts / weight / photo / measurements / clear-
@@ -675,12 +676,33 @@ class _JournalScreenState extends State<JournalScreen>
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
-    final picked = await showDatePicker(
+    // Capture AuthService synchronously before awaits so the loader
+    // closure below doesn't read a stale BuildContext.
+    final auth = context.read<AuthService>();
+    final svc = _service;
+    final picked = await showJournalCalendarPicker(
       context: context,
-      useRootNavigator: false,
       initialDate: _entryDate,
       firstDate: DateTime(now.year - 5),
       lastDate: now,
+      loadEntryDates: (from, to) async {
+        final jwt = await auth.getAccessToken();
+        if (jwt == null) return const <DateTime>{};
+        try {
+          final entries = await svc.listEntries(from, to, jwt);
+          return entries
+              .map((e) {
+                final parsed = DateTime.tryParse(e.entryDate);
+                return parsed == null
+                    ? null
+                    : DateTime(parsed.year, parsed.month, parsed.day);
+              })
+              .whereType<DateTime>()
+              .toSet();
+        } catch (_) {
+          return const <DateTime>{};
+        }
+      },
     );
     if (picked == null || !mounted) return;
     final normalized = DateTime(picked.year, picked.month, picked.day);

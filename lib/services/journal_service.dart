@@ -130,6 +130,52 @@ class JournalService {
     return JournalEntry.fromJson(decoded);
   }
 
+  /// GET {base}/journal?from=&to= — full entries in date range. No
+  /// photo URLs (server intentionally omits them from list responses
+  /// to skip signing). Used by the date-picker calendar to learn
+  /// which days have entries so it can paint a per-day dot. Tolerant
+  /// to both response shapes (top-level array or `{entries: []}`
+  /// wrapper) like [getTodayEntry]; silently returns an empty list
+  /// on malformed payloads so the calendar still works.
+  Future<List<JournalEntry>> listEntries(
+    DateTime from,
+    DateTime to,
+    String jwt,
+  ) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw JournalException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final fromStr = _localDateString(from);
+    final toStr = _localDateString(to);
+    final res = await _client.get(
+      Uri.parse('$base/journal?from=$fromStr&to=$toStr&limit=100'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+    );
+    if (res.statusCode != 200) {
+      throw JournalException(res.statusCode, res.body);
+    }
+    final decoded = jsonDecode(res.body);
+    List<dynamic>? rows;
+    if (decoded is List) {
+      rows = decoded;
+    } else if (decoded is Map<String, dynamic> && decoded['entries'] is List) {
+      rows = decoded['entries'] as List<dynamic>;
+    }
+    if (rows == null) return const [];
+    return rows
+        .map((r) {
+          if (r is Map<String, dynamic>) return JournalEntry.fromJson(r);
+          if (r is Map) return JournalEntry.fromJson(r.cast<String, dynamic>());
+          return null;
+        })
+        .whereType<JournalEntry>()
+        .toList();
+  }
+
   /// LOCAL calendar date as YYYY-MM-DD. A user in PST opening the app at
   /// 11:30pm should see the PST date, not the UTC-rolled-over date.
   static String _localDateString(DateTime d) {
