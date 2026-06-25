@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
-import '../models/voice_mode.dart';
+import '../models/ptt_mode.dart';
 import '../services/voice_sink.dart';
 
 class ChatState extends ChangeNotifier {
@@ -17,7 +17,7 @@ class ChatState extends ChangeNotifier {
   String? _activeOverlay;
   String? _activeBloom;
   VoiceSink? _voiceSink;
-  VoiceMode _voiceMode = VoiceMode.pushToTalk;
+  PttMode _pttMode = PttMode.holdToTalk;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -30,11 +30,11 @@ class ChatState extends ChangeNotifier {
   String? get activeOverlay => _activeOverlay;
   String? get activeBloom => _activeBloom;
   VoiceSink? get voiceSink => _voiceSink;
-  VoiceMode get voiceMode => _voiceMode;
+  PttMode get pttMode => _pttMode;
 
-  void setVoiceMode(VoiceMode mode) {
-    if (_voiceMode == mode) return;
-    _voiceMode = mode;
+  void setPttMode(PttMode mode) {
+    if (_pttMode == mode) return;
+    _pttMode = mode;
     notifyListeners();
   }
 

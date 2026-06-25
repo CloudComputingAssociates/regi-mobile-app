@@ -9,7 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
 import '../models/utterance_result.dart';
-import '../models/voice_mode.dart';
+import '../models/ptt_mode.dart';
 import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
@@ -815,14 +815,9 @@ class _ChatScreenState extends State<ChatScreen> {
     // voice sink (e.g. Journal needs dictation regardless of the user's
     // slider preference), OR the user explicitly chose Voice in the
     // mode slider for plain chat. See CLAUDE.md.
-    //
-    // Wake-word voiceMode hides the PTT entirely — the AppBar mic
-    // indicator + level bars become the sole "is Regi listening" cue.
-    // (Actual always-on listener is not yet wired; for now wake-word
-    // mode just hides the button.)
-    final showPtt = state.voiceMode != VoiceMode.wakeWord &&
-        (state.voiceSink != null || state.mode == InputMode.voice);
-    final isToggleMode = state.voiceMode == VoiceMode.pressTalk;
+    final showPtt =
+        state.voiceSink != null || state.mode == InputMode.voice;
+    final isToggleMode = state.pttMode == PttMode.tapToggle;
     final screenSize = MediaQuery.of(context).size;
     final pttPos = _clampPttPosition(
       _pttPosition ?? _defaultPttPosition(screenSize),

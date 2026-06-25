@@ -27,7 +27,7 @@ class PttButton extends StatefulWidget {
   final VoidCallback? onExitDragMode;
   final void Function(Offset delta)? onDragMove;
 
-  /// VoiceMode.pressTalk: a single tap toggles recording on, the next
+  /// PttMode.tapToggle: a single tap toggles recording on, the next
   /// single tap toggles it off. When this is true, the hold-to-talk
   /// pointer-down semantics are disabled — only pointer-up fires the
   /// callbacks. [toggleActive] tells the button whether it should
