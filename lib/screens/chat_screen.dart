@@ -88,11 +88,20 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _skipClearPrefKey = 'clear_confirm_skip';
   bool _skipClearConfirm = false;
 
-  // One-shot guard so a rebuild during the same screen lifetime can't
-  // re-fire the GLP-1 banner check. Logging the injection flips
-  // isInjectionDay false server-side, so the next app entry simply
-  // doesn't see a due — no local "snooze" needed.
+  // In-memory guard: prevents the banner from re-firing during a
+  // single screen lifetime (rebuilds, post-frame retries, etc.).
   bool _glp1BannerChecked = false;
+  // Persisted: the YYYY-MM-DD the user last tapped "OK" to dismiss
+  // the GLP-1 banner. While this equals today, the banner is
+  // suppressed even though the server still reports
+  // isInjectionDay=true — the user has seen it today and explicitly
+  // chose "leave me alone". Tomorrow the date no longer matches and
+  // the banner returns if still due (because they still haven't
+  // logged). Logging the injection flips isInjectionDay server-side
+  // and the banner stops via the upstream check, independent of
+  // this key. GO TO JOURNAL deliberately does NOT ack — if the user
+  // bounces back without saving, they still want the reminder.
+  static const _glp1AckPrefKey = 'glp1_banner_ack_date';
 
   // PTT button relocation: parent owns position + persistence; the
   // button only reports drag deltas upward. Layout constants + the
@@ -136,6 +145,13 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _maybeShowGlp1Banner() async {
     if (_glp1BannerChecked || !mounted) return;
     _glp1BannerChecked = true;
+    // Per-day ack: if the user already tapped OK today, stay quiet.
+    // The key only persists the ack date string, so a new local
+    // calendar day automatically re-enables the banner.
+    final prefs = await SharedPreferences.getInstance();
+    final todayStr = _localDateString(DateTime.now());
+    if (prefs.getString(_glp1AckPrefKey) == todayStr) return;
+    if (!mounted) return;
     final jwt = await context.read<AuthService>().getAccessToken();
     if (jwt == null || !mounted) return;
     final svc = Glp1Service();
@@ -173,7 +189,17 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             TextButton(
-              onPressed: messenger.hideCurrentMaterialBanner,
+              // Ack for today — write the local date string so
+              // tomorrow's launch re-enables the banner if still
+              // due. Server flipping isInjectionDay (on a logged
+              // injection) is the other path that suppresses it
+              // permanently; OK is just "I see you, leave me alone
+              // for today".
+              onPressed: () async {
+                messenger.hideCurrentMaterialBanner();
+                final p = await SharedPreferences.getInstance();
+                await p.setString(_glp1AckPrefKey, todayStr);
+              },
               child: const Text(
                 'OK',
                 style: TextStyle(color: Color(0xFF1B1B1B)),
@@ -187,6 +213,17 @@ class _ChatScreenState extends State<ChatScreen> {
     } finally {
       svc.dispose();
     }
+  }
+
+  /// LOCAL calendar date as YYYY-MM-DD — same shape as
+  /// JournalService / Glp1Service helpers. Local so a user in PST
+  /// who taps OK at 11:30pm doesn't get the banner back at 12:01am
+  /// UTC-rollover.
+  String _localDateString(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$day';
   }
 
   Future<void> _loadSkipClearPref() async {
