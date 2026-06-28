@@ -914,6 +914,17 @@ class _JournalScreenState extends State<JournalScreen>
                     children: [
                       _dateRow(),
                       const SizedBox(height: 18),
+                      // GLP-1 wedges between the date row and
+                      // Reflective Thoughts so it's front-and-center
+                      // for users on GLP-1. The surrounding
+                      // SizedBox(18) is conditional on the section
+                      // actually rendering, so when the user doesn't
+                      // have GLP-1 enabled the layout collapses
+                      // cleanly (no orphan 18px gap above Thoughts).
+                      if (_glp1Status?.enabled == true) ...[
+                        _glp1Section(),
+                        const SizedBox(height: 18),
+                      ],
                       _thoughtsSection(),
                       const SizedBox(height: 18),
                       _weightSection(),
@@ -921,7 +932,6 @@ class _JournalScreenState extends State<JournalScreen>
                       _photoSection(),
                       const SizedBox(height: 8),
                       _measurementsExpander(),
-                      _glp1Section(),
                       const SizedBox(height: 24),
                       _deleteEntryButton(),
                       const SizedBox(height: 12),
@@ -1946,15 +1956,15 @@ class _JournalScreenState extends State<JournalScreen>
     final isToday = _isSameDay(_glp1Date, DateTime.now());
     final editable =
         _glp1ForDate != null || (isToday && status.isInjectionDay);
-    return Padding(
-      padding: const EdgeInsets.only(top: 18),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _sectionTitle('GLP-1'),
-          if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
-        ],
-      ),
+    // No top padding here — the parent column inserts its own
+    // SizedBox(18) only when this section is showing, so the layout
+    // stays tight when GLP-1 is disabled.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _sectionTitle('GLP-1'),
+        if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
+      ],
     );
   }
 
