@@ -151,9 +151,9 @@ class _JournalScreenState extends State<JournalScreen>
   final TextEditingController _glp1Units = TextEditingController();
   final TextEditingController _glp1Time = TextEditingController();
   bool _glp1IsPm = false;
-  // Independently settable injection date (back/forward-datable);
-  // defaults to the viewed entry date on load.
-  DateTime _glp1Date = DateTime.now();
+  // GLP-1 injection date IS the journal entry date — there's no
+  // separate date control. Logging tomorrow's injection from today's
+  // page makes no journaling sense; bound them together.
   // Separate debounce so a fast units-edit doesn't accidentally
   // flush the journal autosave (or vice versa). Mirrors the
   // _autosaveDebounce shape.
@@ -204,7 +204,6 @@ class _JournalScreenState extends State<JournalScreen>
     // GLP-1 listeners — schedule a debounced upsert on any change.
     _glp1Units.addListener(_onGlp1Mutated);
     _glp1Time.addListener(_onGlp1Mutated);
-    _glp1Date = _entryDate;
     unawaited(_loadGlp1());
   }
 
@@ -1756,7 +1755,7 @@ class _JournalScreenState extends State<JournalScreen>
 
   // ───────── GLP-1 ─────────
 
-  /// Loads status + the per-date injection (if any) for [_glp1Date].
+  /// Loads status + the per-date injection (if any) for [_entryDate].
   /// Status drives whether the section renders at all; the per-date
   /// injection drives editable vs. read-only. Failures degrade
   /// silently — _glp1Status stays null and the section is absent.
@@ -1772,8 +1771,8 @@ class _JournalScreenState extends State<JournalScreen>
       // for that calendar day.
       final injections = await _glp1Service.listInjections(
         jwt,
-        from: _glp1Date,
-        to: _glp1Date,
+        from: _entryDate,
+        to: _entryDate,
       );
       if (!mounted) return;
       final forDate = injections.isEmpty ? null : injections.first;
@@ -1801,7 +1800,7 @@ class _JournalScreenState extends State<JournalScreen>
       } else if (status != null &&
           status.enabled &&
           status.isInjectionDay &&
-          _isSameDay(_glp1Date, DateTime.now())) {
+          _isSameDay(_entryDate, DateTime.now())) {
         final active = status.activeDose;
         _glp1Units.text = _numToText(active?.units);
         _glp1Time.clear();
@@ -1844,7 +1843,7 @@ class _JournalScreenState extends State<JournalScreen>
     final auth = context.read<AuthService>();
     setState(() => _glp1IsSaving = true);
     final inj = Glp1Injection(
-      injectionDate: _wireDate(_glp1Date),
+      injectionDate: _wireDate(_entryDate),
       injectionTime: wireTime,
       doseUnits: units,
     );
@@ -1953,7 +1952,7 @@ class _JournalScreenState extends State<JournalScreen>
     if (status == null || !status.enabled) {
       return const SizedBox.shrink();
     }
-    final isToday = _isSameDay(_glp1Date, DateTime.now());
+    final isToday = _isSameDay(_entryDate, DateTime.now());
     final editable =
         _glp1ForDate != null || (isToday && status.isInjectionDay);
     // No top padding here — the parent column inserts its own
@@ -1962,7 +1961,7 @@ class _JournalScreenState extends State<JournalScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle('GLP-1'),
+        _sectionTitle('GLP-1 Dose'),
         if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
       ],
     );
@@ -1992,55 +1991,29 @@ class _JournalScreenState extends State<JournalScreen>
           ),
           const SizedBox(height: 10),
         ],
-        Row(
-          children: [
-            // Time field (H:MM or HH:MM).
-            SizedBox(
-              width: 90,
-              child: TextField(
-                controller: _glp1Time,
-                keyboardType: TextInputType.datetime,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: _inputFill,
-                  hintText: 'H:MM',
-                  hintStyle: const TextStyle(color: Colors.white54),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            _ampmToggle(),
-            const SizedBox(width: 12),
-            _glp1DateChip(),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+        // Single inline row: [units] IU (mg) at [time] [AM|PM]. Wrap
+        // (not Row) so it gracefully reflows to two lines on
+        // narrow viewports instead of overflowing.
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             SizedBox(
-              width: 90,
+              width: 70,
               child: TextField(
                 controller: _glp1Units,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
+                textAlign: TextAlign.center,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: _inputFill,
-                  hintText: 'units',
+                  hintText: '0',
                   hintStyle: const TextStyle(color: Colors.white54),
                   contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
+                    horizontal: 10,
                     vertical: 10,
                   ),
                   border: OutlineInputBorder(
@@ -2050,12 +2023,38 @@ class _JournalScreenState extends State<JournalScreen>
                 ),
               ),
             ),
-            const SizedBox(width: 10),
-            if (mg != null)
-              Text(
-                '(${_numToText(mg)} mg)',
-                style: const TextStyle(color: Colors.white70, fontSize: 13),
+            Text(
+              mg != null ? 'IU (${_numToText(mg)} mg)' : 'IU',
+              style: const TextStyle(color: Colors.white70, fontSize: 13),
+            ),
+            const Text(
+              'at',
+              style: TextStyle(color: Colors.white54, fontSize: 13),
+            ),
+            SizedBox(
+              width: 80,
+              child: TextField(
+                controller: _glp1Time,
+                keyboardType: TextInputType.datetime,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: _inputFill,
+                  hintText: 'HH:MM',
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
               ),
+            ),
+            _ampmToggle(),
           ],
         ),
       ],
@@ -2109,69 +2108,6 @@ class _JournalScreenState extends State<JournalScreen>
         ),
       ),
     );
-  }
-
-  Widget _glp1DateChip() {
-    return InkWell(
-      onTap: _pickGlp1Date,
-      borderRadius: BorderRadius.circular(20),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: _inputFill,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.calendar_today, size: 14, color: Colors.white70),
-            const SizedBox(width: 6),
-            Text(
-              _humanDate(_glp1Date),
-              style: const TextStyle(color: Colors.white, fontSize: 13),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _pickGlp1Date() async {
-    final now = DateTime.now();
-    // No firstDate floor as strict as the journal (5y back is plenty
-    // for a clinical log too); injections can be future-dated within
-    // a small window in case the user logs a missed/late shot, but
-    // we cap at today for now to match journal behavior.
-    final auth = context.read<AuthService>();
-    final svc = _glp1Service;
-    final picked = await showJournalCalendarPicker(
-      context: context,
-      initialDate: _glp1Date,
-      firstDate: DateTime(now.year - 5),
-      lastDate: now,
-      loadEntryDates: (from, to) async {
-        final jwt = await auth.getAccessToken();
-        if (jwt == null) return const <DateTime>{};
-        try {
-          final injections =
-              await svc.listInjections(jwt, from: from, to: to);
-          return injections
-              .map((i) {
-                final parsed = DateTime.tryParse(i.injectionDate);
-                return parsed == null
-                    ? null
-                    : DateTime(parsed.year, parsed.month, parsed.day);
-              })
-              .whereType<DateTime>()
-              .toSet();
-        } catch (_) {
-          return const <DateTime>{};
-        }
-      },
-    );
-    if (picked == null || !mounted) return;
-    setState(() => _glp1Date = DateTime(picked.year, picked.month, picked.day));
-    await _loadGlp1();
   }
 
   Widget _glp1SinceCard(Glp1Status status) {

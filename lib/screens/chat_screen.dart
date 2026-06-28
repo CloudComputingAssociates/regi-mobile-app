@@ -144,10 +144,17 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       if (!status.enabled || !status.isInjectionDay) return;
       final messenger = ScaffoldMessenger.of(context);
+      // Amber warning background — the same accent used elsewhere in
+      // the app (PTT press-glow) so the warning ties visually but
+      // stands out far more than the dark chrome. Foreground swaps
+      // to a near-black for contrast on yellow.
       messenger.showMaterialBanner(
         MaterialBanner(
-          backgroundColor: const Color(0xFF252525),
-          contentTextStyle: const TextStyle(color: Colors.white),
+          backgroundColor: const Color(0xFFF2B33D),
+          contentTextStyle: const TextStyle(
+            color: Color(0xFF1B1B1B),
+            fontWeight: FontWeight.w600,
+          ),
           content: const Text('GLP-1 injection due today.'),
           actions: [
             TextButton(
@@ -159,14 +166,17 @@ class _ChatScreenState extends State<ChatScreen> {
               },
               child: const Text(
                 'GO TO JOURNAL',
-                style: TextStyle(color: Color(0xFF2196F3)),
+                style: TextStyle(
+                  color: Color(0xFF1B1B1B),
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
             TextButton(
               onPressed: messenger.hideCurrentMaterialBanner,
               child: const Text(
                 'OK',
-                style: TextStyle(color: Colors.white70),
+                style: TextStyle(color: Color(0xFF1B1B1B)),
               ),
             ),
           ],
