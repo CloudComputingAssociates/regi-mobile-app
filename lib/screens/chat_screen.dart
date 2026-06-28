@@ -24,6 +24,7 @@ import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
+import '../services/glp1_service.dart';
 import '../utils/ptt_layout.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
@@ -87,6 +88,12 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _skipClearPrefKey = 'clear_confirm_skip';
   bool _skipClearConfirm = false;
 
+  // One-shot guard so a rebuild during the same screen lifetime can't
+  // re-fire the GLP-1 banner check. Logging the injection flips
+  // isInjectionDay false server-side, so the next app entry simply
+  // doesn't see a due — no local "snooze" needed.
+  bool _glp1BannerChecked = false;
+
   // PTT button relocation: parent owns position + persistence; the
   // button only reports drag deltas upward. Layout constants + the
   // shared SharedPreferences keys live in [PttLayout] so other screens
@@ -110,6 +117,66 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     _loadSkipClearPref();
     _loadPttPosition();
+    // Post-frame so ScaffoldMessenger is mounted before we try to
+    // show a MaterialBanner. Fires on every app entry while due —
+    // logging the injection flips the server's isInjectionDay to
+    // false so it stops on its own (no local "don't ask again").
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_maybeShowGlp1Banner());
+    });
+  }
+
+  /// Asks regi-api whether today is a GLP-1 injection day for the
+  /// signed-in user and, if so, shows a MaterialBanner with a
+  /// "GO TO JOURNAL" action that pushes [JournalScreen] (same push
+  /// the drawer's Enter Journal uses). Any failure — no JWT, network
+  /// drop, malformed response — degrades silently so chat is never
+  /// blocked by a GLP-1 outage. Single-fire per screen lifetime via
+  /// [_glp1BannerChecked].
+  Future<void> _maybeShowGlp1Banner() async {
+    if (_glp1BannerChecked || !mounted) return;
+    _glp1BannerChecked = true;
+    final jwt = await context.read<AuthService>().getAccessToken();
+    if (jwt == null || !mounted) return;
+    final svc = Glp1Service();
+    try {
+      final status = await svc.getStatus(jwt);
+      if (!mounted) return;
+      if (!status.enabled || !status.isInjectionDay) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showMaterialBanner(
+        MaterialBanner(
+          backgroundColor: const Color(0xFF252525),
+          contentTextStyle: const TextStyle(color: Colors.white),
+          content: const Text('GLP-1 injection due today.'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                messenger.hideCurrentMaterialBanner();
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const JournalScreen()),
+                );
+              },
+              child: const Text(
+                'GO TO JOURNAL',
+                style: TextStyle(color: Color(0xFF2196F3)),
+              ),
+            ),
+            TextButton(
+              onPressed: messenger.hideCurrentMaterialBanner,
+              child: const Text(
+                'OK',
+                style: TextStyle(color: Colors.white70),
+              ),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      // Silent — GLP-1 banner is a courtesy, not load-bearing.
+    } finally {
+      svc.dispose();
+    }
   }
 
   Future<void> _loadSkipClearPref() async {

@@ -6,9 +6,11 @@ import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../models/glp1.dart';
 import '../models/journal_entry.dart' as model;
 import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
+import '../services/glp1_service.dart';
 import '../services/journal_service.dart';
 import '../services/stt_service.dart';
 import '../utils/ptt_layout.dart';
@@ -133,6 +135,34 @@ class _JournalScreenState extends State<JournalScreen>
   Timer? _autosaveTimer;
   static const _autosaveDebounce = Duration(milliseconds: 1500);
 
+  // ───────── GLP-1 (self-contained; no global state / VoiceSink touch) ─────────
+  //
+  // Own Glp1Service instance, disposed in this State's dispose() —
+  // never registered against ChatState. Section renders only when
+  // the status fetch succeeds AND the user has GLP-1 enabled; any
+  // failure leaves _glp1Status null and the section is absent.
+  final Glp1Service _glp1Service = Glp1Service();
+  Glp1Status? _glp1Status;
+  // The injection row for whatever date the journal is currently
+  // viewing. Null if no injection on that date yet — the section
+  // then either prefills from activeDose (today + isInjectionDay)
+  // or renders the read-only since-card.
+  Glp1Injection? _glp1ForDate;
+  final TextEditingController _glp1Units = TextEditingController();
+  final TextEditingController _glp1Time = TextEditingController();
+  bool _glp1IsPm = false;
+  // Independently settable injection date (back/forward-datable);
+  // defaults to the viewed entry date on load.
+  DateTime _glp1Date = DateTime.now();
+  // Separate debounce so a fast units-edit doesn't accidentally
+  // flush the journal autosave (or vice versa). Mirrors the
+  // _autosaveDebounce shape.
+  Timer? _glp1SaveTimer;
+  bool _glp1IsSaving = false;
+  // Suppresses the controller listeners during prefill so a
+  // server-populated value doesn't immediately schedule a save.
+  bool _glp1IsPrefilling = false;
+
   // Voice commands intercepted in onFinal instead of being appended to
   // the Thoughts field. Local exact-match (case/whitespace-insensitive,
   // trailing punctuation stripped) so "save" triggers save but "I will
@@ -171,6 +201,11 @@ class _JournalScreenState extends State<JournalScreen>
     }
     unawaited(_loadTodayEntry());
     unawaited(_loadMicPosition());
+    // GLP-1 listeners — schedule a debounced upsert on any change.
+    _glp1Units.addListener(_onGlp1Mutated);
+    _glp1Time.addListener(_onGlp1Mutated);
+    _glp1Date = _entryDate;
+    unawaited(_loadGlp1());
   }
 
   /// Reads the user's last-dragged mic position from the shared
@@ -509,6 +544,7 @@ class _JournalScreenState extends State<JournalScreen>
       _isLoading = true;
     });
     await _loadTodayEntry();
+    await _loadGlp1();
   }
 
   void _prefillFrom(model.JournalEntry e) {
@@ -601,6 +637,10 @@ class _JournalScreenState extends State<JournalScreen>
     _service.dispose();
     unawaited(_recorder.dispose());
     _stt.dispose();
+    _glp1SaveTimer?.cancel();
+    _glp1Units.dispose();
+    _glp1Time.dispose();
+    _glp1Service.dispose();
     // Release any field that still holds focus BEFORE super.dispose()
     // — a dangling primaryFocus on a now-dead node was the original
     // chat-input wedge symptom.
@@ -720,6 +760,7 @@ class _JournalScreenState extends State<JournalScreen>
       _isLoading = true;
     });
     await _loadTodayEntry();
+    await _loadGlp1();
   }
 
   // ───────── Save ─────────
@@ -880,8 +921,7 @@ class _JournalScreenState extends State<JournalScreen>
                       _photoSection(),
                       const SizedBox(height: 8),
                       _measurementsExpander(),
-                      // TODO(glp1): when user setting 'Track GLP-1' ships, render a
-                      // dose field here.
+                      _glp1Section(),
                       const SizedBox(height: 24),
                       _deleteEntryButton(),
                       const SizedBox(height: 12),
@@ -1699,6 +1739,505 @@ class _JournalScreenState extends State<JournalScreen>
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ───────── GLP-1 ─────────
+
+  /// Loads status + the per-date injection (if any) for [_glp1Date].
+  /// Status drives whether the section renders at all; the per-date
+  /// injection drives editable vs. read-only. Failures degrade
+  /// silently — _glp1Status stays null and the section is absent.
+  Future<void> _loadGlp1() async {
+    try {
+      final jwt = await context.read<AuthService>().getAccessToken();
+      if (jwt == null) {
+        if (mounted) setState(() => _glp1Status = null);
+        return;
+      }
+      final status = await _glp1Service.getStatus(jwt, today: DateTime.now());
+      // Per-date row: list with from==to gives back zero or one entry
+      // for that calendar day.
+      final injections = await _glp1Service.listInjections(
+        jwt,
+        from: _glp1Date,
+        to: _glp1Date,
+      );
+      if (!mounted) return;
+      final forDate = injections.isEmpty ? null : injections.first;
+      setState(() {
+        _glp1Status = status;
+        _glp1ForDate = forDate;
+      });
+      _prefillGlp1Controllers();
+    } catch (_) {
+      if (mounted) setState(() => _glp1Status = null);
+    }
+  }
+
+  /// Hydrates the editable controllers from whichever source applies:
+  /// the existing row (if present) wins; else today + isInjectionDay
+  /// borrows defaults from the active tier; else clears.
+  void _prefillGlp1Controllers() {
+    _glp1IsPrefilling = true;
+    try {
+      final row = _glp1ForDate;
+      final status = _glp1Status;
+      if (row != null) {
+        _glp1Units.text = _numToText(row.doseUnits);
+        _applyWireTime(row.injectionTime);
+      } else if (status != null &&
+          status.enabled &&
+          status.isInjectionDay &&
+          _isSameDay(_glp1Date, DateTime.now())) {
+        final active = status.activeDose;
+        _glp1Units.text = _numToText(active?.units);
+        _glp1Time.clear();
+        _glp1IsPm = DateTime.now().hour >= 12;
+      } else {
+        _glp1Units.clear();
+        _glp1Time.clear();
+        _glp1IsPm = false;
+      }
+    } finally {
+      _glp1IsPrefilling = false;
+    }
+  }
+
+  /// Listener installed on the units + time controllers. Schedules a
+  /// debounced upsert — separate timer from the journal autosave so
+  /// the two flows can't interfere with each other.
+  void _onGlp1Mutated() {
+    if (!mounted || _glp1IsPrefilling) return;
+    _scheduleGlp1Save();
+    setState(() {});
+  }
+
+  void _scheduleGlp1Save() {
+    _glp1SaveTimer?.cancel();
+    _glp1SaveTimer = Timer(_autosaveDebounce, _saveGlp1Now);
+  }
+
+  void _saveGlp1Now() {
+    _glp1SaveTimer?.cancel();
+    _glp1SaveTimer = null;
+    if (_glp1IsSaving) return;
+    unawaited(_doGlp1Save());
+  }
+
+  Future<void> _doGlp1Save() async {
+    if (_glp1IsSaving) return;
+    final wireTime = _composeWireTime();
+    final units = double.tryParse(_glp1Units.text.trim());
+    final auth = context.read<AuthService>();
+    setState(() => _glp1IsSaving = true);
+    final inj = Glp1Injection(
+      injectionDate: _wireDate(_glp1Date),
+      injectionTime: wireTime,
+      doseUnits: units,
+    );
+    try {
+      final jwt = await auth.getAccessToken();
+      if (jwt == null) {
+        if (mounted) setState(() => _glp1IsSaving = false);
+        return;
+      }
+      final saved = await _glp1Service.upsertInjection(inj, jwt);
+      if (!mounted) return;
+      setState(() {
+        _glp1ForDate = saved;
+        _glp1IsSaving = false;
+      });
+      // Re-fetch status so isInjectionDay flips off after first save
+      // of the day (drives the chat banner suppression on next entry).
+      unawaited(_refreshGlp1StatusOnly());
+    } catch (_) {
+      if (mounted) setState(() => _glp1IsSaving = false);
+    }
+  }
+
+  Future<void> _refreshGlp1StatusOnly() async {
+    try {
+      final jwt = await context.read<AuthService>().getAccessToken();
+      if (jwt == null) return;
+      final status = await _glp1Service.getStatus(jwt, today: DateTime.now());
+      if (!mounted) return;
+      setState(() => _glp1Status = status);
+    } catch (_) {
+      // Status was already in place from _loadGlp1; ignore.
+    }
+  }
+
+  /// Parses the server's 24h 'HH:MM' into the 12h text + AM/PM the
+  /// editor uses. Does NOT force a leading zero on the hour
+  /// (user-visible field accepts 'H:MM' or 'HH:MM').
+  void _applyWireTime(String? wire) {
+    if (wire == null || wire.isEmpty) {
+      _glp1Time.clear();
+      _glp1IsPm = false;
+      return;
+    }
+    final parts = wire.split(':');
+    if (parts.length != 2) {
+      _glp1Time.clear();
+      _glp1IsPm = false;
+      return;
+    }
+    final h24 = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h24 == null || m == null) {
+      _glp1Time.clear();
+      _glp1IsPm = false;
+      return;
+    }
+    _glp1IsPm = h24 >= 12;
+    var h12 = h24 % 12;
+    if (h12 == 0) h12 = 12;
+    _glp1Time.text = '$h12:${m.toString().padLeft(2, '0')}';
+  }
+
+  /// Composes the editor's 'H:MM' + AM/PM back to the wire's 24h
+  /// 'HH:MM'. Returns null on malformed input so the server stores
+  /// null rather than a junk time.
+  String? _composeWireTime() {
+    final raw = _glp1Time.text.trim();
+    if (raw.isEmpty) return null;
+    final parts = raw.split(':');
+    if (parts.length != 2) return null;
+    final h12 = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h12 == null || m == null) return null;
+    if (h12 < 1 || h12 > 12 || m < 0 || m > 59) return null;
+    var h24 = h12 % 12;
+    if (_glp1IsPm) h24 += 12;
+    return '${h24.toString().padLeft(2, '0')}:'
+        '${m.toString().padLeft(2, '0')}';
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  String _numToText(num? n) {
+    if (n == null) return '';
+    if (n == n.roundToDouble()) return n.toInt().toString();
+    return n.toStringAsFixed(1);
+  }
+
+  String _formatTime12(String? wire) {
+    if (wire == null || wire.isEmpty) return '';
+    final parts = wire.split(':');
+    if (parts.length != 2) return '';
+    final h24 = int.tryParse(parts[0]);
+    final m = int.tryParse(parts[1]);
+    if (h24 == null || m == null) return '';
+    final ampm = h24 >= 12 ? 'PM' : 'AM';
+    var h12 = h24 % 12;
+    if (h12 == 0) h12 = 12;
+    return '$h12:${m.toString().padLeft(2, '0')} $ampm';
+  }
+
+  Widget _glp1Section() {
+    final status = _glp1Status;
+    if (status == null || !status.enabled) {
+      return const SizedBox.shrink();
+    }
+    final isToday = _isSameDay(_glp1Date, DateTime.now());
+    final editable =
+        _glp1ForDate != null || (isToday && status.isInjectionDay);
+    return Padding(
+      padding: const EdgeInsets.only(top: 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _sectionTitle('GLP-1'),
+          if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
+        ],
+      ),
+    );
+  }
+
+  Widget _glp1EditableBlock(Glp1Status status) {
+    final brand = _glp1ForDate?.brandSnapshot ?? status.activeDose?.brand;
+    final mg = _glp1ForDate?.doseMg ?? status.activeDose?.mg;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (brand != null && brand.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF2196F3),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              brand,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        Row(
+          children: [
+            // Time field (H:MM or HH:MM).
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _glp1Time,
+                keyboardType: TextInputType.datetime,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: _inputFill,
+                  hintText: 'H:MM',
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            _ampmToggle(),
+            const SizedBox(width: 12),
+            _glp1DateChip(),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: _glp1Units,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: _inputFill,
+                  hintText: 'units',
+                  hintStyle: const TextStyle(color: Colors.white54),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            if (mg != null)
+              Text(
+                '(${_numToText(mg)} mg)',
+                style: const TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _ampmToggle() {
+    return Container(
+      decoration: BoxDecoration(
+        color: _inputFill,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          _ampmCell('AM', !_glp1IsPm, () {
+            if (_glp1IsPm) {
+              setState(() => _glp1IsPm = false);
+              _scheduleGlp1Save();
+            }
+          }),
+          _ampmCell('PM', _glp1IsPm, () {
+            if (!_glp1IsPm) {
+              setState(() => _glp1IsPm = true);
+              _scheduleGlp1Save();
+            }
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _ampmCell(String label, bool active, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 42,
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: active ? const Color(0xFF2196F3) : Colors.transparent,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: active ? Colors.white : Colors.white70,
+            fontWeight: FontWeight.w600,
+            fontSize: 12,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _glp1DateChip() {
+    return InkWell(
+      onTap: _pickGlp1Date,
+      borderRadius: BorderRadius.circular(20),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: _inputFill,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.calendar_today, size: 14, color: Colors.white70),
+            const SizedBox(width: 6),
+            Text(
+              _humanDate(_glp1Date),
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickGlp1Date() async {
+    final now = DateTime.now();
+    // No firstDate floor as strict as the journal (5y back is plenty
+    // for a clinical log too); injections can be future-dated within
+    // a small window in case the user logs a missed/late shot, but
+    // we cap at today for now to match journal behavior.
+    final auth = context.read<AuthService>();
+    final svc = _glp1Service;
+    final picked = await showJournalCalendarPicker(
+      context: context,
+      initialDate: _glp1Date,
+      firstDate: DateTime(now.year - 5),
+      lastDate: now,
+      loadEntryDates: (from, to) async {
+        final jwt = await auth.getAccessToken();
+        if (jwt == null) return const <DateTime>{};
+        try {
+          final injections =
+              await svc.listInjections(jwt, from: from, to: to);
+          return injections
+              .map((i) {
+                final parsed = DateTime.tryParse(i.injectionDate);
+                return parsed == null
+                    ? null
+                    : DateTime(parsed.year, parsed.month, parsed.day);
+              })
+              .whereType<DateTime>()
+              .toSet();
+        } catch (_) {
+          return const <DateTime>{};
+        }
+      },
+    );
+    if (picked == null || !mounted) return;
+    setState(() => _glp1Date = DateTime(picked.year, picked.month, picked.day));
+    await _loadGlp1();
+  }
+
+  Widget _glp1SinceCard(Glp1Status status) {
+    final last = status.lastInjection;
+    if (last == null) {
+      return const Padding(
+        padding: EdgeInsets.only(top: 4),
+        child: Text(
+          'No GLP-1 injections logged yet.',
+          style: TextStyle(
+            color: Colors.white54,
+            fontSize: 13,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      );
+    }
+    final brand = last.brandSnapshot ?? status.activeDose?.brand;
+    final mg = last.doseMg;
+    final units = last.doseUnits;
+    final time12 = _formatTime12(last.injectionTime);
+    final daysSince = status.daysSince;
+    final hoursSince = status.hoursSince;
+    final nextDue = status.nextDueDate;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (brand != null && brand.isNotEmpty) ...[
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2196F3),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    brand,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+              ],
+              if (units != null)
+                Text(
+                  '${_numToText(units)} units'
+                  '${mg != null ? ' (${_numToText(mg)} mg)' : ''}',
+                  style:
+                      const TextStyle(color: Colors.white, fontSize: 13),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${last.injectionDate}'
+            '${time12.isNotEmpty ? ' · $time12' : ''}',
+            style: const TextStyle(color: Colors.white70, fontSize: 12),
+          ),
+          const SizedBox(height: 4),
+          if (daysSince != null && hoursSince != null)
+            Text(
+              '~${daysSince}d ${hoursSince}h since last injection',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          if (nextDue != null)
+            Text(
+              'next due $nextDue',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
         ],
       ),
     );
