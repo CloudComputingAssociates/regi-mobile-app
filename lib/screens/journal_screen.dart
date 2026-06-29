@@ -1669,7 +1669,10 @@ class _JournalScreenState extends State<JournalScreen>
 
   Widget _measurementsExpander() {
     // Strip ExpansionTile's default dividers so it blends with the
-    // surrounding form.
+    // surrounding form. iconColor at full white (not white70) so the
+    // chevron is the obvious actionability cue. Leading + icon
+    // explicitly says "this opens" — a bare label was unreadable as
+    // an expander.
     final stripped = Theme.of(context).copyWith(
       dividerColor: Colors.transparent,
     );
@@ -1680,14 +1683,26 @@ class _JournalScreenState extends State<JournalScreen>
       child: ExpansionTile(
         tilePadding: EdgeInsets.zero,
         childrenPadding: const EdgeInsets.only(top: 4, bottom: 4),
-        iconColor: Colors.white70,
-        collapsedIconColor: Colors.white70,
+        iconColor: Colors.white,
+        collapsedIconColor: Colors.white,
+        leading: const Icon(
+          Icons.straighten,
+          color: Colors.white70,
+          size: 20,
+        ),
         title: const Text(
-          'Add measurements',
+          'Measurements',
           style: TextStyle(
             color: Colors.white,
             fontSize: 14,
             fontWeight: FontWeight.w500,
+          ),
+        ),
+        subtitle: const Text(
+          'Tap to add waist, hips, chest, etc.',
+          style: TextStyle(
+            color: Colors.white54,
+            fontSize: 12,
           ),
         ),
         children: [
@@ -1974,22 +1989,8 @@ class _JournalScreenState extends State<JournalScreen>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (brand != null && brand.isNotEmpty) ...[
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-            decoration: BoxDecoration(
-              color: const Color(0xFF2196F3),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              brand,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
+          _medLabelRow(brand),
+          const SizedBox(height: 8),
         ],
         // Single inline row: [units] IU (mg) at [time] [AM|PM]. Wrap
         // (not Row) so it gracefully reflows to two lines on
@@ -1999,29 +2000,10 @@ class _JournalScreenState extends State<JournalScreen>
           runSpacing: 8,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            SizedBox(
+            _glp1NumberField(
+              controller: _glp1Units,
+              hint: '0',
               width: 70,
-              child: TextField(
-                controller: _glp1Units,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: _inputFill,
-                  hintText: '0',
-                  hintStyle: const TextStyle(color: Colors.white54),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
             ),
             Text(
               mg != null ? 'IU (${_numToText(mg)} mg)' : 'IU',
@@ -2031,28 +2013,11 @@ class _JournalScreenState extends State<JournalScreen>
               'at',
               style: TextStyle(color: Colors.white54, fontSize: 13),
             ),
-            SizedBox(
+            _glp1NumberField(
+              controller: _glp1Time,
+              hint: 'HH:MM',
               width: 80,
-              child: TextField(
-                controller: _glp1Time,
-                keyboardType: TextInputType.datetime,
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: _inputFill,
-                  hintText: 'HH:MM',
-                  hintStyle: const TextStyle(color: Colors.white54),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
+              keyboardType: TextInputType.datetime,
             ),
             _ampmToggle(),
           ],
@@ -2061,13 +2026,88 @@ class _JournalScreenState extends State<JournalScreen>
     );
   }
 
+  /// Inline med label — `Med: <brand>` — replaces the previous blue
+  /// pill. Pills are for tappable badges; a drug name is identifier
+  /// text, not a chip. "Med:" sits in muted grey as a sub-label,
+  /// brand renders in PTT blue as the prominent value.
+  Widget _medLabelRow(String brand) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        const Text(
+          'Med:',
+          style: TextStyle(
+            color: Colors.white54,
+            fontSize: 13,
+          ),
+        ),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            brand,
+            style: const TextStyle(
+              color: Color(0xFF2196F3),
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Uniform 48dp-tall number/time input — same height, same fill,
+  /// same radius as the AM/PM toggle and the other journal fields.
+  /// Controls in the same row should be visually interchangeable.
+  Widget _glp1NumberField({
+    required TextEditingController controller,
+    required String hint,
+    required double width,
+    TextInputType keyboardType =
+        const TextInputType.numberWithOptions(decimal: true),
+  }) {
+    return SizedBox(
+      width: width,
+      height: 48,
+      child: TextField(
+        controller: controller,
+        keyboardType: keyboardType,
+        textAlign: TextAlign.center,
+        style: const TextStyle(color: Colors.white),
+        decoration: InputDecoration(
+          filled: true,
+          fillColor: _inputFill,
+          hintText: hint,
+          hintStyle: const TextStyle(color: Colors.white54),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 10,
+            vertical: 14,
+          ),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(8),
+            borderSide: BorderSide.none,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _ampmToggle() {
+    // SizedBox + mainAxisSize.min is the fix for the stretch bug:
+    // inside a Wrap, an unconstrained Row eats all available cross-
+    // axis width and the toggle's grey fill streaks across the
+    // screen. min sizes the Row to its children.
     return Container(
+      height: 48,
       decoration: BoxDecoration(
         color: _inputFill,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           _ampmCell('AM', !_glp1IsPm, () {
             if (_glp1IsPm) {
@@ -2091,8 +2131,9 @@ class _JournalScreenState extends State<JournalScreen>
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
       child: Container(
-        width: 42,
-        padding: const EdgeInsets.symmetric(vertical: 10),
+        // 48dp square-ish hit target (Material spec minimum).
+        width: 48,
+        height: 48,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: active ? const Color(0xFF2196F3) : Colors.transparent,
@@ -2103,7 +2144,7 @@ class _JournalScreenState extends State<JournalScreen>
           style: TextStyle(
             color: active ? Colors.white : Colors.white70,
             fontWeight: FontWeight.w600,
-            fontSize: 12,
+            fontSize: 13,
           ),
         ),
       ),
@@ -2137,27 +2178,12 @@ class _JournalScreenState extends State<JournalScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (brand != null && brand.isNotEmpty) ...[
+            _medLabelRow(brand),
+            const SizedBox(height: 4),
+          ],
           Row(
             children: [
-              if (brand != null && brand.isNotEmpty) ...[
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2196F3),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    brand,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-              ],
               if (units != null)
                 Text(
                   '${_numToText(units)} units'
