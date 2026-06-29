@@ -1608,26 +1608,30 @@ class _JournalScreenState extends State<JournalScreen>
         Row(
           children: [
             // Fixed width — only ever holds 5 chars at most (e.g. 315.5).
-            // No need to span across the whole row.
+            // 32dp tall to match the GLP-1 row and the date-arrow
+            // language at the top of the screen.
             SizedBox(
-              width: 110,
+              width: 90,
+              height: 32,
               child: TextField(
                 controller: _weight,
                 focusNode: _weightFocus,
                 keyboardType:
                     const TextInputType.numberWithOptions(decimal: true),
-                style: const TextStyle(color: Colors.white),
+                style: const TextStyle(color: Colors.white, fontSize: 13),
                 decoration: InputDecoration(
                   filled: true,
                   fillColor: _inputFill,
                   hintText: '0',
-                  hintStyle: const TextStyle(color: Colors.white54),
+                  hintStyle:
+                      const TextStyle(color: Colors.white54, fontSize: 13),
+                  isDense: true,
                   contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
+                    horizontal: 8,
+                    vertical: 6,
                   ),
                   border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
+                    borderRadius: BorderRadius.circular(6),
                     borderSide: BorderSide.none,
                   ),
                 ),
@@ -1647,20 +1651,21 @@ class _JournalScreenState extends State<JournalScreen>
         setState(() => _weightUnit = _weightUnit == 'lb' ? 'kg' : 'lb');
         _scheduleAutosave();
       },
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
       child: Container(
-        width: 56,
-        padding: const EdgeInsets.symmetric(vertical: 12),
+        width: 44,
+        height: 32,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: _inputFill,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(6),
         ),
         child: Text(
           _weightUnit,
           style: const TextStyle(
             color: Colors.white,
             fontWeight: FontWeight.w600,
+            fontSize: 13,
           ),
         ),
       ),
@@ -1970,16 +1975,60 @@ class _JournalScreenState extends State<JournalScreen>
     final isToday = _isSameDay(_entryDate, DateTime.now());
     final editable =
         _glp1ForDate != null || (isToday && status.isInjectionDay);
-    // No top padding here — the parent column inserts its own
-    // SizedBox(18) only when this section is showing, so the layout
-    // stays tight when GLP-1 is disabled.
+    // Trash is meaningful only when there's something to clear —
+    // either a saved row on the server OR an in-progress local edit.
+    final hasGlp1Content = _glp1ForDate != null ||
+        _glp1Units.text.trim().isNotEmpty ||
+        _glp1Time.text.trim().isNotEmpty;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _sectionTitle('GLP-1 Dose'),
+        Row(
+          children: [
+            _sectionTitle('GLP-1 Dose'),
+            const SizedBox(width: 10),
+            _sectionTrash(
+              tooltip: 'Clear GLP-1 dose',
+              enabled: hasGlp1Content && !_glp1IsSaving,
+              onTap: _clearGlp1,
+            ),
+          ],
+        ),
         if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
       ],
     );
+  }
+
+  /// Wipes the local controllers AND (when a server row exists)
+  /// fires DELETE /api/glp1/injections/{id}. On success refreshes
+  /// status so `isInjectionDay` can flip back to true (the user
+  /// might re-log, or might have entered the wrong day). Silent on
+  /// any network failure — local state still clears so the user
+  /// sees their intent honored.
+  Future<void> _clearGlp1() async {
+    if (_glp1IsSaving) return;
+    final id = _glp1ForDate?.glp1InjectionId;
+    // Cancel any pending debounced save so we don't immediately
+    // recreate a row we're about to delete.
+    _glp1SaveTimer?.cancel();
+    _glp1SaveTimer = null;
+    setState(() {
+      _glp1IsPrefilling = true;
+      _glp1Units.clear();
+      _glp1Time.clear();
+      _glp1IsPm = false;
+      _glp1ForDate = null;
+      _glp1IsPrefilling = false;
+    });
+    if (id == null) return;
+    try {
+      final jwt = await context.read<AuthService>().getAccessToken();
+      if (jwt == null) return;
+      await _glp1Service.deleteInjection(id, jwt);
+      unawaited(_refreshGlp1StatusOnly());
+    } catch (_) {
+      // Local state already cleared; server error is silent.
+    }
   }
 
   Widget _glp1EditableBlock(Glp1Status status) {
@@ -2059,9 +2108,12 @@ class _JournalScreenState extends State<JournalScreen>
     );
   }
 
-  /// Uniform 48dp-tall number/time input — same height, same fill,
-  /// same radius as the AM/PM toggle and the other journal fields.
-  /// Controls in the same row should be visually interchangeable.
+  /// Compact 32dp-tall input matching the journal date-arrow buttons
+  /// — same height, same fill, same 6px radius — so the GLP-1 row
+  /// reads as part of the same control family as the date row at
+  /// the top of the screen. Smaller than Material's 48dp minimum
+  /// touch target, but visual consistency with the rest of the
+  /// journal trumps spec orthodoxy here.
   Widget _glp1NumberField({
     required TextEditingController controller,
     required String hint,
@@ -2071,23 +2123,24 @@ class _JournalScreenState extends State<JournalScreen>
   }) {
     return SizedBox(
       width: width,
-      height: 48,
+      height: 32,
       child: TextField(
         controller: controller,
         keyboardType: keyboardType,
         textAlign: TextAlign.center,
-        style: const TextStyle(color: Colors.white),
+        style: const TextStyle(color: Colors.white, fontSize: 13),
         decoration: InputDecoration(
           filled: true,
           fillColor: _inputFill,
           hintText: hint,
-          hintStyle: const TextStyle(color: Colors.white54),
+          hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
+          isDense: true,
           contentPadding: const EdgeInsets.symmetric(
-            horizontal: 10,
-            vertical: 14,
+            horizontal: 8,
+            vertical: 6,
           ),
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(6),
             borderSide: BorderSide.none,
           ),
         ),
@@ -2096,15 +2149,14 @@ class _JournalScreenState extends State<JournalScreen>
   }
 
   Widget _ampmToggle() {
-    // SizedBox + mainAxisSize.min is the fix for the stretch bug:
-    // inside a Wrap, an unconstrained Row eats all available cross-
-    // axis width and the toggle's grey fill streaks across the
-    // screen. min sizes the Row to its children.
+    // 32dp tall matches the journal date-arrow language. Row with
+    // mainAxisSize.min so the toggle doesn't stretch the full Wrap
+    // width.
     return Container(
-      height: 48,
+      height: 32,
       decoration: BoxDecoration(
         color: _inputFill,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -2129,22 +2181,21 @@ class _JournalScreenState extends State<JournalScreen>
   Widget _ampmCell(String label, bool active, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
       child: Container(
-        // 48dp square-ish hit target (Material spec minimum).
-        width: 48,
-        height: 48,
+        width: 34,
+        height: 32,
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: active ? const Color(0xFF2196F3) : Colors.transparent,
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(6),
         ),
         child: Text(
           label,
           style: TextStyle(
             color: active ? Colors.white : Colors.white70,
             fontWeight: FontWeight.w600,
-            fontSize: 13,
+            fontSize: 12,
           ),
         ),
       ),
