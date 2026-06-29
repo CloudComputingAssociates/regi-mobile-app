@@ -151,6 +151,10 @@ class _JournalScreenState extends State<JournalScreen>
   final TextEditingController _glp1Units = TextEditingController();
   final TextEditingController _glp1Time = TextEditingController();
   bool _glp1IsPm = false;
+  // false = IU display, true = mg display. The wire always stores
+  // doseUnits in IU; mg mode is a UI convenience that converts to/
+  // from IU using activeDose.units / activeDose.mg as the ratio.
+  bool _glp1IsMg = false;
   // GLP-1 injection date IS the journal entry date — there's no
   // separate date control. Logging tomorrow's injection from today's
   // page makes no journaling sense; bound them together.
@@ -913,21 +917,22 @@ class _JournalScreenState extends State<JournalScreen>
                     children: [
                       _dateRow(),
                       const SizedBox(height: 18),
-                      // GLP-1 wedges between the date row and
-                      // Reflective Thoughts so it's front-and-center
-                      // for users on GLP-1. The surrounding
-                      // SizedBox(18) is conditional on the section
-                      // actually rendering, so when the user doesn't
-                      // have GLP-1 enabled the layout collapses
-                      // cleanly (no orphan 18px gap above Thoughts).
-                      if (_glp1Status?.enabled == true) ...[
-                        _glp1Section(),
-                        const SizedBox(height: 18),
-                      ],
                       _thoughtsSection(),
                       const SizedBox(height: 18),
                       _weightSection(),
                       const SizedBox(height: 18),
+                      // GLP-1 lives between Weight and Photo so the
+                      // primary daily-journaling fields (date,
+                      // Reflective Thoughts, weight) read tightly at
+                      // the top. Surrounding SizedBox(18) is
+                      // conditional on the section actually rendering
+                      // — when the user doesn't have GLP-1 enabled
+                      // the layout collapses cleanly with no orphan
+                      // gap.
+                      if (_glp1Status?.enabled == true) ...[
+                        _glp1Section(),
+                        const SizedBox(height: 18),
+                      ],
                       _photoSection(),
                       const SizedBox(height: 8),
                       _measurementsExpander(),
@@ -1808,31 +1813,103 @@ class _JournalScreenState extends State<JournalScreen>
 
   /// Hydrates the editable controllers from whichever source applies:
   /// the existing row (if present) wins; else today + isInjectionDay
-  /// borrows defaults from the active tier; else clears.
+  /// borrows defaults from the active tier; else clears. Display
+  /// value respects the current IU/mg toggle.
   void _prefillGlp1Controllers() {
     _glp1IsPrefilling = true;
     try {
       final row = _glp1ForDate;
       final status = _glp1Status;
+      double? iu;
+      if (row?.doseUnits != null) {
+        iu = row!.doseUnits;
+      } else if (status != null &&
+          status.enabled &&
+          status.isInjectionDay &&
+          _isSameDay(_entryDate, DateTime.now())) {
+        iu = status.activeDose?.units;
+      }
+      if (iu != null) {
+        _glp1Units.text = _displayDose(iu);
+      } else {
+        _glp1Units.clear();
+      }
       if (row != null) {
-        _glp1Units.text = _numToText(row.doseUnits);
         _applyWireTime(row.injectionTime);
       } else if (status != null &&
           status.enabled &&
           status.isInjectionDay &&
           _isSameDay(_entryDate, DateTime.now())) {
-        final active = status.activeDose;
-        _glp1Units.text = _numToText(active?.units);
         _glp1Time.clear();
         _glp1IsPm = DateTime.now().hour >= 12;
       } else {
-        _glp1Units.clear();
         _glp1Time.clear();
         _glp1IsPm = false;
       }
     } finally {
       _glp1IsPrefilling = false;
     }
+  }
+
+  /// Conversion factor IU-per-mg from the active tier, or null when
+  /// activeDose is missing either side of the ratio. Used by IU↔mg
+  /// display conversion and by save() to send IU on the wire even
+  /// when the user typed in mg mode.
+  double? _activeIuPerMg() {
+    final a = _glp1Status?.activeDose;
+    if (a == null) return null;
+    final u = a.units;
+    final mg = a.mg;
+    if (u == null || mg == null || mg == 0) return null;
+    return u / mg;
+  }
+
+  /// Formats a stored IU value into the controller text for the
+  /// currently-selected display unit. Falls back to IU when the
+  /// conversion ratio isn't known.
+  String _displayDose(double iu) {
+    if (!_glp1IsMg) return _numToText(iu);
+    final ratio = _activeIuPerMg();
+    if (ratio == null) return _numToText(iu);
+    return _numToText(iu / ratio);
+  }
+
+  /// Reads the typed value and converts back to IU for the wire.
+  /// Returns null on empty/unparseable. When in mg mode without a
+  /// known ratio we send the typed number as-is — better to log
+  /// the user's intent than drop their input on the floor.
+  double? _typedAsIu() {
+    final raw = double.tryParse(_glp1Units.text.trim());
+    if (raw == null) return null;
+    if (!_glp1IsMg) return raw;
+    final ratio = _activeIuPerMg();
+    if (ratio == null) return raw;
+    return raw * ratio;
+  }
+
+  /// Toggle handler — flips the display unit and reconverts the
+  /// currently-typed value in place. Pure display change: the
+  /// underlying IU doesn't move, so no save fires.
+  void _toggleIuMg() {
+    final raw = double.tryParse(_glp1Units.text.trim());
+    final ratio = _activeIuPerMg();
+    setState(() {
+      final wasMg = _glp1IsMg;
+      _glp1IsMg = !_glp1IsMg;
+      if (raw == null || ratio == null) return;
+      _glp1IsPrefilling = true;
+      try {
+        if (wasMg) {
+          // Was mg, now IU → multiply.
+          _glp1Units.text = _numToText(raw * ratio);
+        } else {
+          // Was IU, now mg → divide.
+          _glp1Units.text = _numToText(raw / ratio);
+        }
+      } finally {
+        _glp1IsPrefilling = false;
+      }
+    });
   }
 
   /// Listener installed on the units + time controllers. Schedules a
@@ -1859,7 +1936,9 @@ class _JournalScreenState extends State<JournalScreen>
   Future<void> _doGlp1Save() async {
     if (_glp1IsSaving) return;
     final wireTime = _composeWireTime();
-    final units = double.tryParse(_glp1Units.text.trim());
+    // Wire ALWAYS stores doseUnits in IU; if user typed in mg mode,
+    // convert via _typedAsIu() before sending.
+    final units = _typedAsIu();
     final auth = context.read<AuthService>();
     setState(() => _glp1IsSaving = true);
     final inj = Glp1Injection(
@@ -1992,10 +2071,58 @@ class _JournalScreenState extends State<JournalScreen>
               enabled: hasGlp1Content && !_glp1IsSaving,
               onTap: _clearGlp1,
             ),
+            const Spacer(),
+            // Only show the IU/mg toggle when the field is editable
+            // — irrelevant on the read-only since-card.
+            if (editable) _iuMgToggle(),
           ],
         ),
         if (editable) _glp1EditableBlock(status) else _glp1SinceCard(status),
       ],
+    );
+  }
+
+  /// Compact pill-style IU/mg toggle modeled on [ModeSlider]. Lives
+  /// in the section title row to the right of the trash. Pure
+  /// display toggle — doesn't dirty state, doesn't trigger a save.
+  Widget _iuMgToggle() {
+    return GestureDetector(
+      onTap: _toggleIuMg,
+      child: Container(
+        height: 26,
+        padding: const EdgeInsets.symmetric(horizontal: 3),
+        decoration: BoxDecoration(
+          color: _inputFill,
+          borderRadius: BorderRadius.circular(13),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _iuMgSegment('IU', !_glp1IsMg),
+            _iuMgSegment('mg', _glp1IsMg),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _iuMgSegment(String label, bool active) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 120),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: active ? const Color(0xFFF2B33D) : Colors.transparent,
+        borderRadius: BorderRadius.circular(11),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: active ? Colors.black : Colors.white70,
+          fontSize: 11,
+          fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+        ),
+      ),
     );
   }
 
@@ -2033,76 +2160,66 @@ class _JournalScreenState extends State<JournalScreen>
 
   Widget _glp1EditableBlock(Glp1Status status) {
     final brand = _glp1ForDate?.brandSnapshot ?? status.activeDose?.brand;
-    final mg = _glp1ForDate?.doseMg ?? status.activeDose?.mg;
+    final activeUnits = status.activeDose?.units;
+    final activeMg = _glp1ForDate?.doseMg ?? status.activeDose?.mg;
+    // Parenthetical conversion swaps with the toggle: in IU mode we
+    // show the equivalent mg, in mg mode we show the equivalent IU.
+    // Source values come from activeDose so the parens stay stable
+    // while the user types.
+    String? parenLabel;
+    if (_glp1IsMg) {
+      parenLabel = activeUnits != null ? '(${_numToText(activeUnits)} IU)' : null;
+    } else {
+      parenLabel = activeMg != null ? '(${_numToText(activeMg)} mg)' : null;
+    }
+    final unitLabel = _glp1IsMg ? 'mg' : 'IU';
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (brand != null && brand.isNotEmpty) ...[
-          _medLabelRow(brand),
-          const SizedBox(height: 8),
+          // Plain blue brand text — no "Med:" prefix, no pill, no
+          // chrome. The drug name is information, not a control.
+          Text(
+            brand,
+            style: const TextStyle(
+              color: Color(0xFF2196F3),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 6),
         ],
-        // Single inline row: [units] IU (mg) at [time] [AM|PM]. Wrap
-        // (not Row) so it gracefully reflows to two lines on
-        // narrow viewports instead of overflowing.
+        // Compact single row: [dose] {unit} (conversion) at [time] [AM|PM].
+        // Tight Wrap spacing reclaims horizontal space around the
+        // time field per request.
         Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: 4,
+          runSpacing: 6,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
             _glp1NumberField(
               controller: _glp1Units,
               hint: '0',
-              width: 70,
+              width: 56,
             ),
             Text(
-              mg != null ? 'IU (${_numToText(mg)} mg)' : 'IU',
-              style: const TextStyle(color: Colors.white70, fontSize: 13),
+              parenLabel != null ? '$unitLabel $parenLabel' : unitLabel,
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
             ),
+            const SizedBox(width: 2),
             const Text(
               'at',
-              style: TextStyle(color: Colors.white54, fontSize: 13),
+              style: TextStyle(color: Colors.white54, fontSize: 12),
             ),
             _glp1NumberField(
               controller: _glp1Time,
               hint: 'HH:MM',
-              width: 80,
+              width: 64,
               keyboardType: TextInputType.datetime,
             ),
             _ampmToggle(),
           ],
-        ),
-      ],
-    );
-  }
-
-  /// Inline med label — `Med: <brand>` — replaces the previous blue
-  /// pill. Pills are for tappable badges; a drug name is identifier
-  /// text, not a chip. "Med:" sits in muted grey as a sub-label,
-  /// brand renders in PTT blue as the prominent value.
-  Widget _medLabelRow(String brand) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.baseline,
-      textBaseline: TextBaseline.alphabetic,
-      children: [
-        const Text(
-          'Med:',
-          style: TextStyle(
-            color: Colors.white54,
-            fontSize: 13,
-          ),
-        ),
-        const SizedBox(width: 6),
-        Flexible(
-          child: Text(
-            brand,
-            style: const TextStyle(
-              color: Color(0xFF2196F3),
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
         ),
       ],
     );
@@ -2230,20 +2347,23 @@ class _JournalScreenState extends State<JournalScreen>
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (brand != null && brand.isNotEmpty) ...[
-            _medLabelRow(brand),
+            Text(
+              brand,
+              style: const TextStyle(
+                color: Color(0xFF2196F3),
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
             const SizedBox(height: 4),
           ],
-          Row(
-            children: [
-              if (units != null)
-                Text(
-                  '${_numToText(units)} units'
-                  '${mg != null ? ' (${_numToText(mg)} mg)' : ''}',
-                  style:
-                      const TextStyle(color: Colors.white, fontSize: 13),
-                ),
-            ],
-          ),
+          if (units != null)
+            Text(
+              '${_numToText(units)} IU'
+              '${mg != null ? ' (${_numToText(mg)} mg)' : ''}',
+              style: const TextStyle(color: Colors.white, fontSize: 13),
+            ),
           const SizedBox(height: 6),
           Text(
             '${last.injectionDate}'
