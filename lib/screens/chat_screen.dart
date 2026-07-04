@@ -28,6 +28,7 @@ import '../services/glp1_service.dart';
 import '../utils/ptt_layout.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
+import 'food_upc_scan_screen.dart';
 import 'journal_screen.dart';
 import 'settings_screen.dart';
 
@@ -904,6 +905,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => const JournalScreen(),
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                title: const Text(
+                  'Food UPC scan',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const FoodUpcScanScreen(),
                     ),
                   );
                 },
