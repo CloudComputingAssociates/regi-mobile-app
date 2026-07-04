@@ -219,6 +219,11 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               controller: _controller,
               onDetect: _onDetect,
               fit: BoxFit.cover,
+              // Let the user tap the preview to drive autofocus — the
+              // fix for a persistently fuzzy image that never resolves a
+              // barcode. Detection is full-frame, so the tap is purely
+              // about focus, not aiming.
+              tapToFocus: true,
               errorBuilder: (context, error) => _cameraError(error),
             ),
             // Red reticle — only while the camera is live, so the user
@@ -339,7 +344,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       );
     }
     return Text(
-      _busy ? 'Looking up…' : 'Point the camera at a barcode.',
+      _busy
+          ? 'Looking up…'
+          : 'Hold the barcode ~8 in away and tap the preview to focus.',
       style: const TextStyle(color: Colors.white54, fontSize: 13),
     );
   }
