@@ -59,6 +59,15 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   // resolved product name until the user taps Scan again.
   ScannedFood? _result;
 
+  // TEMP DIAGNOSTICS — remove once scanning is confirmed working.
+  // Every raw detection event bumps _detectCount and records what the
+  // engine returned, shown live under the preview. If _detectCount stays
+  // 0 while pointing at a barcode, the detector isn't emitting at all
+  // (engine/permission/plugin issue). If it climbs, the pipeline works
+  // and any remaining problem is in our handling.
+  int _detectCount = 0;
+  String _lastRaw = '(none yet)';
+
   @override
   void dispose() {
     _controller.dispose();
@@ -71,6 +80,18 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   /// stream only triggers one lookup: bail unless we're actively scanning
   /// and not already posting.
   void _onDetect(BarcodeCapture capture) {
+    // Record EVERY event before any guard so the diagnostic line reflects
+    // raw detector activity, independent of our scan/busy state.
+    final raw = capture.barcodes.isEmpty
+        ? '(${capture.barcodes.length} barcodes)'
+        : capture.barcodes
+            .map((b) => '${b.format.name}:${b.rawValue ?? "null"}')
+            .join(', ');
+    setState(() {
+      _detectCount++;
+      _lastRaw = raw;
+    });
+
     if (!_scanning || _busy) return;
     final code = capture.barcodes
         .map((b) => b.rawValue)
@@ -158,7 +179,17 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _scannerBox(),
-            const SizedBox(height: 20),
+            const SizedBox(height: 8),
+            // TEMP diagnostic readout — remove once scanning is verified.
+            Text(
+              'detections: $_detectCount • last: $_lastRaw',
+              style: const TextStyle(
+                color: Colors.white38,
+                fontSize: 11,
+                fontFamily: 'monospace',
+              ),
+            ),
+            const SizedBox(height: 12),
             _nameField(locked),
             const SizedBox(height: 8),
             _resultLine(),
