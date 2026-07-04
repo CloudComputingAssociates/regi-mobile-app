@@ -41,16 +41,12 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   final UserFoodService _service = UserFoodService();
   final TextEditingController _name = TextEditingController();
 
-  // Restrict to the retail-product symbologies so the detector isn't
-  // distracted by QR / Code-128 clutter in frame.
+  // NOTE: deliberately NOT restricting `formats`. On Android, passing an
+  // explicit format list to mobile_scanner is a well-known cause of the
+  // camera previewing fine but never firing a detection. We scan all
+  // formats and (if we ever need to) filter in the callback instead.
   final MobileScannerController _controller = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
-    formats: const [
-      BarcodeFormat.upcA,
-      BarcodeFormat.upcE,
-      BarcodeFormat.ean13,
-      BarcodeFormat.ean8,
-    ],
   );
 
   // Camera live and hunting for a code. Auto-true on mount (the
