@@ -59,6 +59,10 @@ The colored primary AppBar actions appear when actionable and disappear when not
 When colored icons sit alongside other AppBar actions, prefer stroke-style glyphs (Icons.check, Icons.close) over filled-disc variants so they match peer icons' visual weight.
 Workflow conventions for Claude
 
+Deployment target is a WEB PWA. This app ships as a Flutter web build deployed to Netlify; the user's phone runs the latest published PWA in the browser. It is NOT (currently) a native Android/iOS install. Before reaching for any native fix — AndroidManifest permissions, Info.plist keys, ML Kit / Play Services config, platform channels — remember it does nothing for the deployed PWA. Camera, geolocation, notifications, focus, etc. all go through the BROWSER's web APIs (getUserMedia, BarcodeDetector, Permissions API). Any package used for a device capability MUST have working web support, and web-specific setup (HTTPS, index.html scripts, browser API availability, iOS-Safari gaps) is what matters. Confirm the platform before debugging a "device" problem.
+
+Question format: NEVER ask the user via bulleted / multiple-choice option lists (the AskUserQuestion picker style). The user finds that format unwanted. Ask any clarifying questions inline, in plain prose sentences, and keep them short.
+
 Builds: Claude MAY run flutter build / flutter analyze / flutter test to verify changes compile and pass.
 Commits: Claude NEVER runs git commit. After every set of code changes, Claude provides a TERSE commit message (one line, lower-case, imperative) for the user to copy. The user owns the commit.
 Cross-project edits: Claude NEVER modifies files outside this project (e.g. regi-api, regi-web). If a change requires work in a sibling repo, Claude SUGGESTS the change in prose. The user may then explicitly ask for a ready-to-paste prompt for that other project.

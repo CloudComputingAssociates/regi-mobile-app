@@ -6,14 +6,6 @@
         android:label="RegiMenu"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
-        <!-- Ask Google Play services to download the ML Kit barcode model
-             at install time. Without this, mobile_scanner's default
-             (unbundled) model downloads lazily on first use, so the
-             camera previews but detects nothing until the download
-             completes. -->
-        <meta-data
-            android:name="com.google.mlkit.vision.DEPENDENCIES"
-            android:value="barcode" />
         <activity
             android:name=".MainActivity"
             android:exported="true"

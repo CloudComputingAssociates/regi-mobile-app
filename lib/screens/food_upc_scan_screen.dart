@@ -1,21 +1,29 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
 import '../services/user_food_service.dart';
+// Conditional: real BarcodeDetector-backed scanner on web, unsupported stub
+// elsewhere. See services/upc_scanner_web.dart for why mobile_scanner can't
+// read UPC codes on web.
+import '../services/upc_scanner_stub.dart'
+    if (dart.library.js_interop) '../services/upc_scanner_web.dart';
 
-/// Standalone Food UPC scan screen, pushed onto the root Navigator from
-/// the drawer. Owns its own camera (a [MobileScannerController]) — no
-/// global state is touched, mirroring the Journal screen's
-/// self-contained-mic convention.
+/// Standalone Food UPC scan screen, pushed onto the root Navigator from the
+/// drawer. Owns its own camera ([UpcScannerController]) — no global state is
+/// touched, mirroring the Journal screen's self-contained-mic convention.
+///
+/// PLATFORM: this app ships as a web PWA. Scanning uses the browser-native
+/// `BarcodeDetector` API, which exists in Chrome on Android but NOT in any
+/// iOS browser (all forced onto WebKit). Where it's absent we show a clear
+/// "not supported" panel instead of a dead camera.
 ///
 /// FLOW
 ///   • Camera auto-starts on open (scanning, Scan button disabled).
-///   • Point at a UPC → first detection stops the camera and POSTs the
-///     code to /userfoods/barcode (categoryId 9 = processed food for now).
+///   • Point at a UPC → first detection stops the camera and POSTs the code
+///     to /userfoods/barcode (categoryId 9 = processed food for now).
 ///   • On success the returned product name (food.description) is dropped
 ///     into the read-only Name box; the Scan button comes alive.
 ///   • On failure a "Lookup food failure" toast shows; Scan still comes
@@ -23,9 +31,9 @@ import '../services/user_food_service.dart';
 ///   • Pressing Scan re-opens the Name box for editing (optional short
 ///     name) and restarts the camera.
 ///
-/// The Name box is the user's OPTIONAL short name (userDescription) BEFORE
-/// a scan; AFTER a successful scan it is overwritten with the resolved
-/// product name and locked until the next Scan press.
+/// The Name box is the user's OPTIONAL short name (userDescription) BEFORE a
+/// scan; AFTER a successful scan it is overwritten with the resolved product
+/// name and locked until the next Scan press.
 class FoodUpcScanScreen extends StatefulWidget {
   const FoodUpcScanScreen({super.key});
 
@@ -39,66 +47,64 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   static const Color _scanRed = Color(0xFFFF3B30);
 
   final UserFoodService _service = UserFoodService();
+  final UpcScannerController _scanner = UpcScannerController();
   final TextEditingController _name = TextEditingController();
 
-  // NOTE: deliberately NOT restricting `formats`. On Android, passing an
-  // explicit format list to mobile_scanner is a well-known cause of the
-  // camera previewing fine but never firing a detection. We scan all
-  // formats and (if we ever need to) filter in the callback instead.
-  final MobileScannerController _controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
-  );
+  final bool _supported = UpcScannerController.isSupported;
 
-  // Camera live and hunting for a code. Auto-true on mount (the
-  // MobileScanner widget auto-starts the controller). While true the
-  // Scan button is stippled — there's nothing to (re)start.
-  bool _scanning = true;
+  // Camera live and hunting for a code. While true the Scan button is
+  // stippled — there's nothing to (re)start.
+  bool _scanning = false;
   // POST in flight. Also disables the Scan button and shows a spinner.
   bool _busy = false;
-  // Last successful lookup. Non-null == Name box is locked to the
-  // resolved product name until the user taps Scan again.
+  // Last successful lookup. Non-null == Name box is locked to the resolved
+  // product name until the user taps Scan again.
   ScannedFood? _result;
 
-  // TEMP DIAGNOSTICS — remove once scanning is confirmed working.
-  // Every raw detection event bumps _detectCount and records what the
-  // engine returned, shown live under the preview. If _detectCount stays
-  // 0 while pointing at a barcode, the detector isn't emitting at all
-  // (engine/permission/plugin issue). If it climbs, the pipeline works
-  // and any remaining problem is in our handling.
+  // TEMP DIAGNOSTICS — remove once scanning is confirmed working. Bumps on
+  // every raw detection; if it stays 0 while aimed at a barcode the detector
+  // isn't emitting, if it climbs the pipeline works.
   int _detectCount = 0;
   String _lastRaw = '(none yet)';
 
   @override
+  void initState() {
+    super.initState();
+    if (_supported) unawaited(_beginScan());
+  }
+
+  @override
   void dispose() {
-    _controller.dispose();
+    _scanner.dispose();
     _service.dispose();
     _name.dispose();
     super.dispose();
   }
 
-  /// First barcode of a scan session. Guarded so the rapid-fire detection
-  /// stream only triggers one lookup: bail unless we're actively scanning
-  /// and not already posting.
-  void _onDetect(BarcodeCapture capture) {
-    // Record EVERY event before any guard so the diagnostic line reflects
-    // raw detector activity, independent of our scan/busy state.
-    final raw = capture.barcodes.isEmpty
-        ? '(${capture.barcodes.length} barcodes)'
-        : capture.barcodes
-            .map((b) => '${b.format.name}:${b.rawValue ?? "null"}')
-            .join(', ');
+  /// Opens the camera and starts detection. Shared by initial mount and the
+  /// Scan (rescan) button.
+  Future<void> _beginScan() async {
+    try {
+      await _scanner.start(onDetect: _onCode);
+      if (mounted) setState(() => _scanning = true);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _scanning = false);
+        _toast('Camera error: $e');
+      }
+    }
+  }
+
+  /// Called with the raw digits of a detected barcode. Guarded so the
+  /// rapid-fire detect loop only triggers one lookup.
+  void _onCode(String code) {
     setState(() {
       _detectCount++;
-      _lastRaw = raw;
+      _lastRaw = code;
     });
-
     if (!_scanning || _busy) return;
-    final code = capture.barcodes
-        .map((b) => b.rawValue)
-        .firstWhere((v) => v != null && v.isNotEmpty, orElse: () => null);
-    if (code == null) return;
     setState(() => _scanning = false);
-    unawaited(_controller.stop());
+    unawaited(_scanner.stop());
     unawaited(_lookup(code));
   }
 
@@ -137,19 +143,14 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   }
 
   /// Re-arm: unlock the Name box, forget the last result, restart the
-  /// camera. Clears the box so the user can type a fresh optional short
-  /// name before the next scan.
+  /// camera. Clears the box so the user can type a fresh optional short name
+  /// before the next scan.
   Future<void> _rescan() async {
     setState(() {
       _result = null;
       _name.clear();
-      _scanning = true;
     });
-    try {
-      await _controller.start();
-    } catch (_) {
-      if (mounted) _toast('Could not start camera.');
-    }
+    await _beginScan();
   }
 
   void _toast(String msg) {
@@ -179,35 +180,32 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _scannerBox(),
-            const SizedBox(height: 8),
-            // TEMP diagnostic readout — remove once scanning is verified.
-            Text(
-              'detections: $_detectCount • last: $_lastRaw',
-              style: const TextStyle(
-                color: Colors.white38,
-                fontSize: 11,
-                fontFamily: 'monospace',
+            if (_supported) ...[
+              const SizedBox(height: 8),
+              // TEMP diagnostic readout — remove once scanning is verified.
+              Text(
+                'detections: $_detectCount • last: $_lastRaw',
+                style: const TextStyle(
+                  color: Colors.white38,
+                  fontSize: 11,
+                  fontFamily: 'monospace',
+                ),
               ),
-            ),
+            ],
             const SizedBox(height: 12),
             _nameField(locked),
             const SizedBox(height: 8),
             _resultLine(),
             const SizedBox(height: 20),
-            _scanButton(),
+            if (_supported) _scanButton(),
           ],
         ),
       ),
     );
   }
 
-  /// Square camera preview with a red UPC-style reticle. The
-  /// [MobileScanner] stays mounted for the screen's whole life — we drive
-  /// the camera with the controller's [stop]/[start] rather than adding/
-  /// removing the widget, because a remount would auto-start the camera
-  /// and race an explicit [start] (→ controllerInitializing). Between
-  /// scans an opaque panel is stacked over the (stopped) preview.
   Widget _scannerBox() {
+    if (!_supported) return _unsupportedBox();
     return AspectRatio(
       aspectRatio: 1,
       child: ClipRRect(
@@ -215,22 +213,13 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            MobileScanner(
-              controller: _controller,
-              onDetect: _onDetect,
-              fit: BoxFit.cover,
-              // Let the user tap the preview to drive autofocus — the
-              // fix for a persistently fuzzy image that never resolves a
-              // barcode. Detection is full-frame, so the tap is purely
-              // about focus, not aiming.
-              tapToFocus: true,
-              errorBuilder: (context, error) => _cameraError(error),
-            ),
-            // Red reticle — only while the camera is live, so the user
-            // knows where to aim.
+            // The <video> platform view stays mounted for the whole screen;
+            // start()/stop() swap the camera stream on it.
+            _scanner.buildPreview(),
+            // Red reticle — only while the camera is live, so the user knows
+            // where to aim.
             if (_scanning) _redReticle(),
-            // Opaque "camera off" panel between scans (after a result,
-            // before the next Scan press).
+            // Opaque "camera off" panel between scans.
             if (!_scanning && !_busy)
               Container(
                 color: Colors.black,
@@ -243,10 +232,45 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               ),
             if (_busy)
               Container(
-                color: Colors.black,
+                color: Colors.black45,
                 alignment: Alignment.center,
                 child: const CircularProgressIndicator(color: _scanRed),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Shown where `BarcodeDetector` is unavailable — notably any iOS browser
+  /// (Safari, and Chrome/Edge/Firefox on iOS, all WebKit).
+  Widget _unsupportedBox() {
+    return AspectRatio(
+      aspectRatio: 1,
+      child: Container(
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: const [
+            Icon(Icons.no_photography, color: _scanRed, size: 48),
+            SizedBox(height: 14),
+            Text(
+              'Barcode scanning isn’t supported in this browser yet.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white, fontSize: 15),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Use Chrome on Android. (iPhone browsers can’t scan yet — '
+              'support is coming.)',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white54, fontSize: 12),
+            ),
           ],
         ),
       ),
@@ -272,26 +296,6 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             ),
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _cameraError(MobileScannerException error) {
-    return Container(
-      color: Colors.black,
-      alignment: Alignment.center,
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.no_photography, color: _scanRed, size: 48),
-          const SizedBox(height: 12),
-          Text(
-            'Camera unavailable\n${error.errorCode.name}',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
-          ),
-        ],
       ),
     );
   }
@@ -343,17 +347,16 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         ),
       );
     }
+    if (!_supported) return const SizedBox.shrink();
     return Text(
-      _busy
-          ? 'Looking up…'
-          : 'Hold the barcode ~8 in away and tap the preview to focus.',
+      _busy ? 'Looking up…' : 'Hold the barcode steady, filling the frame.',
       style: const TextStyle(color: Colors.white54, fontSize: 13),
     );
   }
 
   Widget _scanButton() {
-    // Alive only when the camera is idle (a scan has returned, success
-    // or failure). Stippled while auto-scanning or while a lookup posts.
+    // Alive only when the camera is idle (a scan has returned, success or
+    // failure). Stippled while auto-scanning or while a lookup posts.
     final enabled = !_scanning && !_busy;
     return Center(
       child: ElevatedButton.icon(
