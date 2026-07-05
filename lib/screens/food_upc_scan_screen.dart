@@ -73,18 +73,6 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   // product name until the user taps Scan again.
   ScannedFood? _result;
 
-  // TEMP DIAGNOSTICS — remove once scanning is confirmed working. Bumps on
-  // every raw detection; if it stays 0 while aimed at a barcode the detector
-  // isn't emitting, if it climbs the pipeline works.
-  int _detectCount = 0;
-  String _lastRaw = '(none yet)';
-
-  @override
-  void initState() {
-    super.initState();
-    if (_supported) unawaited(_beginScan());
-  }
-
   @override
   void dispose() {
     _scanner.dispose();
@@ -110,10 +98,6 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   /// Called with the raw digits of a detected barcode. Guarded so the
   /// rapid-fire detect loop only triggers one lookup.
   void _onCode(String code) {
-    setState(() {
-      _detectCount++;
-      _lastRaw = code;
-    });
     if (!_scanning || _busy) return;
     setState(() => _scanning = false);
     unawaited(_scanner.stop());
@@ -164,14 +148,17 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     }
   }
 
-  /// Re-arm: unlock the Name box, forget the last result, restart the
-  /// camera. Clears the box so the user can type a fresh optional short name
-  /// before the next scan.
-  Future<void> _rescan() async {
-    setState(() {
-      _result = null;
-      _name.clear();
-    });
+  /// The Scan button. Nothing scans until this is pressed (no auto-start).
+  /// On a FIRST scan we keep whatever optional Name the user typed (it's the
+  /// userDescription we send). When starting over from a shown result we
+  /// unlock + clear the Name so they can enter a fresh one.
+  Future<void> _onScanPressed() async {
+    if (_result != null) {
+      setState(() {
+        _result = null;
+        _name.clear();
+      });
+    }
     await _beginScan();
   }
 
@@ -201,28 +188,32 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // On a successful scan the camera is replaced by the resolved
-            // product image (+ Take pic). Otherwise the live scanner.
-            _result != null ? _pictureBox() : _scannerBox(),
-            if (_supported && _result == null) ...[
-              const SizedBox(height: 8),
-              // TEMP diagnostic readout — remove once scanning is verified.
-              Text(
-                'detections: $_detectCount • last: $_lastRaw',
-                style: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                  fontFamily: 'monospace',
-                ),
-              ),
-            ],
-            const SizedBox(height: 12),
-            _categoryField(),
-            const SizedBox(height: 12),
-            _nameField(locked),
-            const SizedBox(height: 8),
-            _resultLine(),
+            // Step 1 — Name (optional), at the top.
+            _stepRow('1', 'Name', optional: true, input: _nameInput(locked)),
+            const SizedBox(height: 16),
+            // Step 2 — Category (optional), underneath.
+            _stepRow('2', 'Category', optional: true, input: _categoryInput()),
             const SizedBox(height: 20),
+            // Step 3 — Scan. One window (live red-bar scanner now, product
+            // picture later once the image block is sorted), with the Scan
+            // button directly beneath it.
+            Row(
+              children: [
+                _stepBadge('3'),
+                const SizedBox(width: 10),
+                const Text(
+                  'Scan',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            _result != null ? _pictureBox() : _scannerBox(),
+            const SizedBox(height: 12),
             if (_supported) _scanButton(),
           ],
         ),
@@ -245,15 +236,21 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             // Red reticle — only while the camera is live, so the user knows
             // where to aim.
             if (_scanning) _redReticle(),
-            // Opaque "camera off" panel between scans.
+            // Opaque idle panel — camera stays off until Scan is pressed.
             if (!_scanning && !_busy)
               Container(
                 color: Colors.black,
                 alignment: Alignment.center,
-                child: const Icon(
-                  Icons.qr_code_scanner,
-                  color: Colors.white24,
-                  size: 64,
+                child: const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.qr_code_scanner, color: Colors.white24, size: 64),
+                    SizedBox(height: 10),
+                    Text(
+                      'Press Scan to start',
+                      style: TextStyle(color: Colors.white38, fontSize: 13),
+                    ),
+                  ],
                 ),
               ),
             if (_busy)
@@ -388,46 +385,114 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     _toast('Take pic is coming next — needs the image-upload endpoint.');
   }
 
-  /// Category selector shown above the Name box. Drives [_categoryId], sent
-  /// with the barcode POST. Currently only the confirmed Processed=9 entry
-  /// is populated — see the _categories TODO.
-  Widget _categoryField() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+  /// A numbered step row: badge + label (+ "(optional)") on the left, and
+  /// the input taking the remaining width on the right. The input is
+  /// intentionally NOT full-width — the label eats fixed space so the whole
+  /// row, "(optional)" included, fits on a standard phone.
+  Widget _stepRow(
+    String number,
+    String title, {
+    bool optional = false,
+    required Widget input,
+  }) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        const Text(
-          'Category',
-          style: TextStyle(
+        _stepBadge(number),
+        const SizedBox(width: 10),
+        Text(
+          title,
+          style: const TextStyle(
             color: Colors.white,
-            fontSize: 14,
+            fontSize: 15,
             fontWeight: FontWeight.w600,
           ),
         ),
-        const SizedBox(height: 6),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          decoration: BoxDecoration(
-            color: _inputFill,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              value: _categoryId,
-              isExpanded: true,
-              dropdownColor: const Color(0xFF3A3A3A),
-              iconEnabledColor: Colors.white70,
-              style: const TextStyle(color: Colors.white, fontSize: 15),
-              items: [
-                for (final c in _categories)
-                  DropdownMenuItem<int>(value: c.id, child: Text(c.name)),
-              ],
-              onChanged: (v) {
-                if (v != null) setState(() => _categoryId = v);
-              },
+        if (optional) ...[
+          const SizedBox(width: 5),
+          const Text(
+            '(optional)',
+            style: TextStyle(
+              color: Colors.white38,
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
             ),
           ),
-        ),
+        ],
+        const SizedBox(width: 10),
+        Expanded(child: input),
       ],
+    );
+  }
+
+  Widget _stepBadge(String number) {
+    return Container(
+      width: 24,
+      height: 24,
+      decoration: const BoxDecoration(color: _scanRed, shape: BoxShape.circle),
+      alignment: Alignment.center,
+      child: Text(
+        number,
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  /// Compact Name box (step 1). Locked + shows the resolved product name
+  /// after a successful scan; editable (the optional userDescription) before.
+  Widget _nameInput(bool locked) {
+    return TextField(
+      controller: _name,
+      readOnly: locked,
+      style: const TextStyle(color: Colors.white, fontSize: 14),
+      decoration: InputDecoration(
+        isDense: true,
+        filled: true,
+        fillColor: _inputFill,
+        hintText: locked ? null : 'e.g. Triscuits',
+        hintStyle: const TextStyle(color: Colors.white54, fontSize: 12),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
+
+  /// Compact Category dropdown (step 2). Drives [_categoryId], sent with the
+  /// barcode POST. Currently only the confirmed Processed=9 entry exists —
+  /// see the _categories TODO.
+  Widget _categoryInput() {
+    return Container(
+      height: 42,
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: _inputFill,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<int>(
+          value: _categoryId,
+          isExpanded: true,
+          isDense: true,
+          dropdownColor: const Color(0xFF3A3A3A),
+          iconEnabledColor: Colors.white70,
+          style: const TextStyle(color: Colors.white, fontSize: 14),
+          items: [
+            for (final c in _categories)
+              DropdownMenuItem<int>(value: c.id, child: Text(c.name)),
+          ],
+          onChanged: (v) {
+            if (v != null) setState(() => _categoryId = v);
+          },
+        ),
+      ),
     );
   }
 
@@ -454,69 +519,20 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     );
   }
 
-  Widget _nameField(bool locked) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          locked ? 'Name' : 'Name (optional)',
-          style: const TextStyle(
-            color: Colors.white,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        const SizedBox(height: 6),
-        TextField(
-          controller: _name,
-          readOnly: locked,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            filled: true,
-            fillColor: _inputFill,
-            hintText: locked ? null : 'e.g. Triscuits',
-            hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// Status line under the Name box. Shows the resolved product name
-  /// prominently after a scan; otherwise a hint about what to do.
-  Widget _resultLine() {
-    if (_result != null) {
-      return Text(
-        _result!.name,
-        style: const TextStyle(
-          color: Color(0xFFF2B33D),
-          fontSize: 16,
-          fontWeight: FontWeight.bold,
-        ),
-      );
-    }
-    if (!_supported) return const SizedBox.shrink();
-    return Text(
-      _busy ? 'Looking up…' : 'Hold the barcode steady, filling the frame.',
-      style: const TextStyle(color: Colors.white54, fontSize: 13),
-    );
-  }
-
   Widget _scanButton() {
-    // Alive only when the camera is idle (a scan has returned, success or
-    // failure). Stippled while auto-scanning or while a lookup posts.
+    // Alive when the camera is idle — before the first scan and after a scan
+    // returns (success or failure). Stippled while scanning or posting.
     final enabled = !_scanning && !_busy;
+    final label = _busy
+        ? 'Looking up…'
+        : _scanning
+            ? 'Scanning…'
+            : 'Scan';
     return Center(
       child: ElevatedButton.icon(
-        onPressed: enabled ? _rescan : null,
+        onPressed: enabled ? _onScanPressed : null,
         icon: const Icon(Icons.qr_code_scanner, size: 20),
-        label: const Text('Scan'),
+        label: Text(label),
         style: ElevatedButton.styleFrom(
           backgroundColor: _scanRed,
           foregroundColor: Colors.white,
