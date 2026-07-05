@@ -40,6 +40,17 @@ class ScannedFood {
   /// Full decoded `food` object for later use.
   final Map<String, dynamic> raw;
 
+  /// Full-size product image from the resolver, or null if absent/empty.
+  String? get imageUrl => _nonEmpty(raw['foodImage']);
+
+  /// Thumbnail product image, or null if absent/empty.
+  String? get thumbnailUrl => _nonEmpty(raw['foodImageThumbnail']);
+
+  static String? _nonEmpty(dynamic v) {
+    final s = v?.toString().trim();
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
   factory ScannedFood.fromFood(Map<String, dynamic> food) {
     return ScannedFood(
       id: food['id'] is int ? food['id'] as int : null,

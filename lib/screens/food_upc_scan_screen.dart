@@ -52,6 +52,18 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
 
   final bool _supported = UpcScannerController.isSupported;
 
+  // Category sent with the barcode POST. Defaults to 9 (Processed). The
+  // dropdown above the Name box drives this.
+  //
+  // TODO(categories): _categories currently holds only the confirmed
+  // Processed=9 entry — the full id→name list still needs to come from the
+  // API (or be pasted in). Once we have it, fill this list and the dropdown
+  // is complete; the plumbing below already passes the selection through.
+  int _categoryId = 9;
+  static const List<({int id, String name})> _categories = [
+    (id: 9, name: 'Processed'),
+  ];
+
   // Camera live and hunting for a code. While true the Scan button is
   // stippled — there's nothing to (re)start.
   bool _scanning = false;
@@ -127,6 +139,7 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         upcCode,
         jwt,
         userDescription: _name.text,
+        categoryId: _categoryId,
       );
       if (!mounted) return;
       setState(() {
@@ -135,10 +148,19 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         // Overlay the Name box with the resolved product name and lock it.
         _name.text = food.name;
       });
+    } on UserFoodException catch (e) {
+      // Any non-2xx from the barcode endpoint (we didn't get a 201/200
+      // create-or-update) surfaces here. Report the status so a real 404
+      // "not found" reads differently from a 500 outage.
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _toast(e.statusCode == 404
+          ? 'Food not found for that barcode.'
+          : 'Couldn’t add food (HTTP ${e.statusCode}).');
     } catch (_) {
       if (!mounted) return;
       setState(() => _busy = false);
-      _toast('Lookup food failure');
+      _toast('Lookup failed — check your connection and try again.');
     }
   }
 
@@ -179,8 +201,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            _scannerBox(),
-            if (_supported) ...[
+            // On a successful scan the camera is replaced by the resolved
+            // product image (+ Take pic). Otherwise the live scanner.
+            _result != null ? _pictureBox() : _scannerBox(),
+            if (_supported && _result == null) ...[
               const SizedBox(height: 8),
               // TEMP diagnostic readout — remove once scanning is verified.
               Text(
@@ -192,6 +216,8 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
                 ),
               ),
             ],
+            const SizedBox(height: 12),
+            _categoryField(),
             const SizedBox(height: 12),
             _nameField(locked),
             const SizedBox(height: 8),
@@ -274,6 +300,128 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// Product image shown after a successful scan, replacing the camera. If
+  /// the resolver returned no image (or a broken URL) we show a placeholder
+  /// so "Take pic" is still the obvious next action.
+  Widget _pictureBox() {
+    final url = _result?.imageUrl;
+    return AspectRatio(
+      aspectRatio: 1,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (url != null)
+              Image.network(
+                url,
+                fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => _noImagePlaceholder(),
+                loadingBuilder: (ctx, child, progress) => progress == null
+                    ? child
+                    : Container(
+                        color: Colors.black,
+                        alignment: Alignment.center,
+                        child: const CircularProgressIndicator(
+                          color: _scanRed,
+                        ),
+                      ),
+              )
+            else
+              _noImagePlaceholder(),
+            Positioned(
+              right: 10,
+              bottom: 10,
+              child: ElevatedButton.icon(
+                onPressed: _takePic,
+                icon: const Icon(Icons.photo_camera, size: 18),
+                label: const Text('Take pic'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _scanRed,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _noImagePlaceholder() {
+    return Container(
+      color: Colors.black,
+      alignment: Alignment.center,
+      child: const Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.image_not_supported, color: Colors.white24, size: 56),
+          SizedBox(height: 8),
+          Text(
+            'No product image',
+            style: TextStyle(color: Colors.white38, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Placeholder for now. Capturing + uploading a replacement image is the
+  /// next step; it's blocked on the image-upload endpoint contract.
+  Future<void> _takePic() async {
+    _toast('Take pic is coming next — needs the image-upload endpoint.');
+  }
+
+  /// Category selector shown above the Name box. Drives [_categoryId], sent
+  /// with the barcode POST. Currently only the confirmed Processed=9 entry
+  /// is populated — see the _categories TODO.
+  Widget _categoryField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Category',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            color: _inputFill,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<int>(
+              value: _categoryId,
+              isExpanded: true,
+              dropdownColor: const Color(0xFF3A3A3A),
+              iconEnabledColor: Colors.white70,
+              style: const TextStyle(color: Colors.white, fontSize: 15),
+              items: [
+                for (final c in _categories)
+                  DropdownMenuItem<int>(value: c.id, child: Text(c.name)),
+              ],
+              onChanged: (v) {
+                if (v != null) setState(() => _categoryId = v);
+              },
+            ),
+          ),
+        ),
+      ],
     );
   }
 
