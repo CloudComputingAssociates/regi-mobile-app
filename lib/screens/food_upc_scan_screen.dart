@@ -53,14 +53,19 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   final bool _supported = UpcScannerController.isSupported;
 
   // Category sent with the barcode POST. Defaults to 9 (Processed). The
-  // dropdown above the Name box drives this.
-  //
-  // TODO(categories): _categories currently holds only the confirmed
-  // Processed=9 entry — the full id→name list still needs to come from the
-  // API (or be pasted in). Once we have it, fill this list and the dropdown
-  // is complete; the plumbing below already passes the selection through.
+  // dropdown above the Name box drives this. Hardcoded from the Categories
+  // table; the live source of truth is GET /api/foods/categories if we ever
+  // want to fetch instead of hardcode.
   int _categoryId = 9;
   static const List<({int id, String name})> _categories = [
+    (id: 1, name: 'Protein'),
+    (id: 2, name: 'Fat'),
+    (id: 3, name: 'Carbohydrate'),
+    (id: 4, name: 'Vegetable'),
+    (id: 5, name: 'Fruit'),
+    (id: 6, name: 'Dairy'),
+    (id: 7, name: 'Beverage'),
+    (id: 8, name: 'Seasonings'),
     (id: 9, name: 'Processed'),
   ];
 
