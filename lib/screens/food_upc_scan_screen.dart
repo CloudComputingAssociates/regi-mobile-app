@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
@@ -80,6 +82,20 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   // True while we're polling the food row for the async-fetched product image
   // (imageStatus == "fetching"). Drives the "Getting image…" spinner.
   bool _fetchingImage = false;
+  // A freshly-taken photo the user hasn't committed yet. While non-null the
+  // picture box shows it as a preview with Retake / Use photo, and it's held
+  // in memory until Save uploads it. Cleared on rescan or after a save.
+  Uint8List? _pendingPhoto;
+  // The category the last scan persisted server-side. The dropdown can drift
+  // from this after the scan; the gap is what Save's category PATCH commits.
+  int? _savedCategoryId;
+  // Save (image upload + category PATCH) in flight.
+  bool _saving = false;
+
+  /// Category was changed after the scan and there's no pending photo to carry
+  /// it — so it needs its own Save affordance (the AppBar check).
+  bool get _categoryDirty =>
+      _result != null && _savedCategoryId != null && _categoryId != _savedCategoryId;
 
   @override
   void dispose() {
@@ -137,6 +153,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       setState(() {
         _result = food;
         _busy = false;
+        // The scan persisted this category server-side; track it so a later
+        // dropdown change reads as dirty and offers a Save.
+        _savedCategoryId = _categoryId;
         // Overlay the Name box with the resolved product name and lock it.
         _name.text = food.name;
       });
@@ -201,6 +220,7 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       setState(() {
         _result = null;
         _fetchingImage = false;
+        _pendingPhoto = null;
         _name.clear();
       });
     }
@@ -227,6 +247,17 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white,
         title: const Text('Food UPC scan'),
+        actions: [
+          // Save appears only for a category-only edit (a pending photo carries
+          // its own "Use photo" commit, so we don't double up). It never renders
+          // in a ghost-disabled state — it's here or it isn't.
+          if (_categoryDirty && _pendingPhoto == null && !_saving)
+            IconButton(
+              tooltip: 'Save',
+              icon: const Icon(Icons.check, color: _scanRed),
+              onPressed: _save,
+            ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
@@ -345,10 +376,14 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     );
   }
 
-  /// Product image shown after a successful scan, replacing the camera. If
-  /// the resolver returned no image (or a broken URL) we show a placeholder
-  /// so "Take pic" is still the obvious next action.
+  /// Picture area shown after a successful scan, replacing the camera. Three
+  /// states:
+  ///   • a pending photo (just taken, not yet saved) → preview + Retake / Use
+  ///     photo;
+  ///   • the resolved product image (or placeholder) → + Take pic.
+  /// A saving overlay covers the box while the upload/PATCH is in flight.
   Widget _pictureBox() {
+    final pending = _pendingPhoto;
     final url = _result?.imageUrl;
     return AspectRatio(
       aspectRatio: 1,
@@ -357,7 +392,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            if (url != null)
+            // Image layer.
+            if (pending != null)
+              Image.memory(pending, fit: BoxFit.cover)
+            else if (url != null)
               Image.network(
                 url,
                 fit: BoxFit.cover,
@@ -382,27 +420,80 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               _fetchingImagePlaceholder()
             else
               _noImagePlaceholder(),
-            Positioned(
-              right: 10,
-              bottom: 10,
-              child: ElevatedButton.icon(
-                onPressed: _takePic,
-                icon: const Icon(Icons.photo_camera, size: 18),
-                label: const Text('Take pic'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: _scanRed,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 10,
-                  ),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
+
+            // Button layer.
+            if (pending != null)
+              _pendingPhotoActions()
+            else
+              Positioned(
+                right: 10,
+                bottom: 10,
+                child: _pictureButton(
+                  onPressed: _saving ? null : _takePic,
+                  icon: Icons.photo_camera,
+                  label: 'Take pic',
                 ),
               ),
-            ),
+
+            // Saving overlay.
+            if (_saving)
+              Container(
+                color: Colors.black45,
+                alignment: Alignment.center,
+                child: const CircularProgressIndicator(color: _scanRed),
+              ),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Retake / Use photo pair shown over a freshly-taken, uncommitted photo.
+  /// "Use photo" is the approval — it runs the full [_save] (upload the photo,
+  /// which deletes the old one + rebuilds the thumbnail server-side, plus any
+  /// pending category change). "Retake" re-opens the camera.
+  Widget _pendingPhotoActions() {
+    return Positioned(
+      left: 10,
+      right: 10,
+      bottom: 10,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          _pictureButton(
+            onPressed: _saving ? null : _takePic,
+            icon: Icons.refresh,
+            label: 'Retake',
+            filled: false,
+          ),
+          _pictureButton(
+            onPressed: _saving ? null : _save,
+            icon: Icons.check,
+            label: 'Use photo',
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// A pill button used inside the picture box. `filled` false gives a
+  /// translucent secondary (Retake) against the photo.
+  Widget _pictureButton({
+    required VoidCallback? onPressed,
+    required IconData icon,
+    required String label,
+    bool filled = true,
+  }) {
+    return ElevatedButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 18),
+      label: Text(label),
+      style: ElevatedButton.styleFrom(
+        backgroundColor: filled ? _scanRed : Colors.black54,
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
         ),
       ),
     );
@@ -447,10 +538,73 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     );
   }
 
-  /// Placeholder for now. Capturing + uploading a replacement image is the
-  /// next step; it's blocked on the image-upload endpoint contract.
+  /// Opens the device camera (via image_picker) for a still photo of the food
+  /// container. On web this is a file input with `capture=environment`, so it
+  /// works even on iOS Safari (unlike the barcode scanner, which needs
+  /// BarcodeDetector). The shot is held in [_pendingPhoto] as a preview — it's
+  /// not uploaded until the user approves it with "Use photo".
   Future<void> _takePic() async {
-    _toast('Take pic is coming next — needs the image-upload endpoint.');
+    try {
+      final shot = await ImagePicker().pickImage(
+        source: ImageSource.camera,
+        maxWidth: 2048,
+      );
+      if (shot == null) return; // user cancelled
+      final bytes = await shot.readAsBytes();
+      if (!mounted) return;
+      setState(() => _pendingPhoto = bytes);
+    } catch (e) {
+      _toast('Camera unavailable: $e');
+    }
+  }
+
+  /// Commits the user's post-scan edits in one shot and reports back with a
+  /// single "Food image and info updated" toast. Uploads a pending photo (the
+  /// API deletes the prior image + rebuilds the thumbnail synchronously) and
+  /// PATCHes the category if it drifted from what the scan saved. Name is
+  /// intentionally not editable post-scan, so it never participates here.
+  Future<void> _save() async {
+    final food = _result;
+    if (food == null || food.id == null) return;
+    final auth = context.read<AuthService>();
+    setState(() => _saving = true);
+
+    final jwt = await auth.getAccessToken();
+    if (jwt == null) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _toast('Not authenticated.');
+      return;
+    }
+
+    try {
+      // Category first, then image: the image key is derived from the (locked)
+      // description, not the category, so ordering is only about not leaving a
+      // photo uploaded if the category call fails.
+      if (_categoryId != _savedCategoryId) {
+        await _service.updateCategory(food.id!, jwt, _categoryId);
+      }
+      final photo = _pendingPhoto;
+      if (photo != null) {
+        final url = await _service.uploadProductImage(food.id!, jwt, photo);
+        if (url != null) food.raw['foodImage'] = url;
+      }
+      if (!mounted) return;
+      setState(() {
+        _savedCategoryId = _categoryId;
+        _pendingPhoto = null;
+        _saving = false;
+      });
+      _toast('Food image and info updated.');
+    } on UserFoodException catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _toast('Save failed (HTTP ${e.statusCode}).');
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _toast('Save failed — check your connection and try again.');
+    }
   }
 
   /// A numbered step row: badge + label (+ "(optional)") on the left, and

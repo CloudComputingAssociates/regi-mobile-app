@@ -160,5 +160,64 @@ class UserFoodService {
     return null;
   }
 
+  /// PATCH {base}/userfoods/{id}/category — single-field re-categorize
+  /// (owner-scoped). Deliberately NOT a full PUT: a full-row update would null
+  /// out the row's image / nutrition / serving / UPC.
+  Future<void> updateCategory(int id, String jwt, int categoryId) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw UserFoodException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final res = await _client.patch(
+      Uri.parse('$base/userfoods/$id/category'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({'categoryId': categoryId}),
+    );
+    if (res.statusCode != 200) {
+      throw UserFoodException(res.statusCode, res.body);
+    }
+  }
+
+  /// POST {base}/image/upload/product (multipart) — uploads a replacement
+  /// product photo for a user food. Server-side this deletes the prior
+  /// image + thumbnail from GCS, resizes to fit 720x720, generates the 80x80
+  /// thumbnail (all synchronous), and updates the row. Returns the new
+  /// cache-busted product image URL (`cdn_url`), or null if the shape shifts.
+  Future<String?> uploadProductImage(
+    int id,
+    String jwt,
+    List<int> bytes, {
+    String filename = 'photo.jpg',
+  }) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw UserFoodException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final req = http.MultipartRequest(
+      'POST',
+      Uri.parse('$base/image/upload/product'),
+    )
+      ..headers['Authorization'] = 'Bearer $jwt'
+      ..fields['source'] = 'user'
+      ..fields['foodId'] = '$id'
+      // No content-type on the part: the API sniffs the image format from the
+      // bytes (image.Decode), so the multipart part's MIME type is ignored.
+      ..files.add(http.MultipartFile.fromBytes('image', bytes, filename: filename));
+
+    final streamed = await _client.send(req);
+    final res = await http.Response.fromStream(streamed);
+    if (res.statusCode != 200) {
+      throw UserFoodException(res.statusCode, res.body);
+    }
+    final decoded = jsonDecode(res.body);
+    if (decoded is Map<String, dynamic>) {
+      return ScannedFood._nonEmpty(decoded['cdn_url']);
+    }
+    return null;
+  }
+
   void dispose() => _client.close();
 }
