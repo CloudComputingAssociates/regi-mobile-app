@@ -319,6 +319,12 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               Image.network(
                 url,
                 fit: BoxFit.cover,
+                // The product images live on GCS (yeh-cdn) which doesn't send
+                // CORS headers, so CanvasKit's byte-fetch path fails and the
+                // image never appears. `prefer` renders it through an HTML
+                // <img> element instead (no CORS needed for display), which
+                // is why the URL works in a browser but not via Image.network.
+                webHtmlElementStrategy: WebHtmlElementStrategy.prefer,
                 errorBuilder: (_, __, ___) => _noImagePlaceholder(),
                 loadingBuilder: (ctx, child, progress) => progress == null
                     ? child
