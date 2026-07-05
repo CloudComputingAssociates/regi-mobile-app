@@ -77,6 +77,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   // Last successful lookup. Non-null == Name box is locked to the resolved
   // product name until the user taps Scan again.
   ScannedFood? _result;
+  // True while we're polling the food row for the async-fetched product image
+  // (imageStatus == "fetching"). Drives the "Getting image…" spinner.
+  bool _fetchingImage = false;
 
   @override
   void dispose() {
@@ -137,6 +140,13 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         // Overlay the Name box with the resolved product name and lock it.
         _name.text = food.name;
       });
+      // FatSecret doesn't supply product images. On a fresh scan the API kicks
+      // off an async OpenFoodFacts fetch and returns imageStatus == "fetching"
+      // with a still-NULL foodImage — so we poll the row until it backfills.
+      // A cache-hit rescan already has the image (imageUrl != null → no poll).
+      if (food.imageUrl == null && food.imageStatus == 'fetching') {
+        unawaited(_pollForImage(food, jwt));
+      }
     } on UserFoodException catch (e) {
       // Any non-2xx from the barcode endpoint (we didn't get a 201/200
       // create-or-update) surfaces here. Report the status so a real 404
@@ -153,6 +163,35 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     }
   }
 
+  /// Polls the food row for the product image the API fetches asynchronously
+  /// from OpenFoodFacts. The row lands with a NULL `foodImage`; the enrichment
+  /// worker backfills it a moment later. We retry a handful of times, then
+  /// give up and leave the "No product image" placeholder (Take pic path).
+  ///
+  /// Guarded by identity on [_result]: if the user rescans (or leaves) while
+  /// we're polling, `_result != food` and we bail without touching state.
+  Future<void> _pollForImage(ScannedFood food, String jwt) async {
+    final id = food.id;
+    if (id == null) return;
+    if (mounted && _result == food) setState(() => _fetchingImage = true);
+    try {
+      for (var attempt = 0; attempt < 6; attempt++) {
+        await Future.delayed(const Duration(seconds: 2));
+        if (!mounted || _result != food) return;
+        final url = await _service.fetchFoodImageUrl(id, jwt);
+        if (!mounted || _result != food) return;
+        if (url != null) {
+          setState(() => food.raw['foodImage'] = url);
+          return;
+        }
+      }
+    } catch (_) {
+      // Swallow — a failed poll just leaves the placeholder in place.
+    } finally {
+      if (mounted && _result == food) setState(() => _fetchingImage = false);
+    }
+  }
+
   /// The Scan button. Nothing scans until this is pressed (no auto-start).
   /// On a FIRST scan we keep whatever optional Name the user typed (it's the
   /// userDescription we send). When starting over from a shown result we
@@ -161,6 +200,7 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     if (_result != null) {
       setState(() {
         _result = null;
+        _fetchingImage = false;
         _name.clear();
       });
     }
@@ -338,6 +378,8 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
                         ),
                       ),
               )
+            else if (_fetchingImage)
+              _fetchingImagePlaceholder()
             else
               _noImagePlaceholder(),
             Positioned(
@@ -362,6 +404,27 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Shown while the async OpenFoodFacts image fetch is in flight — the row
+  /// exists but its `foodImage` hasn't backfilled yet. Falls back to
+  /// [_noImagePlaceholder] once polling gives up.
+  Widget _fetchingImagePlaceholder() {
+    return Container(
+      color: Colors.black,
+      alignment: Alignment.center,
+      child: const Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircularProgressIndicator(color: _scanRed),
+          SizedBox(height: 12),
+          Text(
+            'Getting product image…',
+            style: TextStyle(color: Colors.white38, fontSize: 13),
+          ),
+        ],
       ),
     );
   }

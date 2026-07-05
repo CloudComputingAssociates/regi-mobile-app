@@ -23,6 +23,7 @@ class ScannedFood {
     required this.shortDescription,
     required this.upcCode,
     required this.raw,
+    this.imageStatus,
   });
 
   /// Server food id.
@@ -40,6 +41,13 @@ class ScannedFood {
   /// Full decoded `food` object for later use.
   final Map<String, dynamic> raw;
 
+  /// What the barcode endpoint said about the product image:
+  ///   "fetching" — API is downloading it from OpenFoodFacts async; the row's
+  ///                `foodImage` is still NULL and must be re-fetched shortly.
+  ///   "needed"   — no source image; the user should snap a photo.
+  ///   "" / null  — already populated (cache hit) or enrichment off.
+  final String? imageStatus;
+
   /// Full-size product image from the resolver, or null if absent/empty.
   String? get imageUrl => _nonEmpty(raw['foodImage']);
 
@@ -51,13 +59,17 @@ class ScannedFood {
     return (s == null || s.isEmpty) ? null : s;
   }
 
-  factory ScannedFood.fromFood(Map<String, dynamic> food) {
+  factory ScannedFood.fromFood(
+    Map<String, dynamic> food, {
+    String? imageStatus,
+  }) {
     return ScannedFood(
       id: food['id'] is int ? food['id'] as int : null,
       name: (food['description'] ?? '').toString(),
       shortDescription: food['shortDescription']?.toString(),
       upcCode: food['upcCode']?.toString(),
       raw: food,
+      imageStatus: imageStatus,
     );
   }
 }
@@ -110,9 +122,11 @@ class UserFoodService {
     final decoded = jsonDecode(res.body);
     // Tolerate both `{ "food": {...} }` and a bare food object.
     Map<String, dynamic>? food;
+    String? imageStatus;
     if (decoded is Map<String, dynamic>) {
       if (decoded['food'] is Map) {
         food = (decoded['food'] as Map).cast<String, dynamic>();
+        imageStatus = decoded['imageStatus']?.toString();
       } else if (decoded.containsKey('description')) {
         food = decoded;
       }
@@ -123,7 +137,27 @@ class UserFoodService {
         'unexpected response shape: ${res.body}',
       );
     }
-    return ScannedFood.fromFood(food);
+    return ScannedFood.fromFood(food, imageStatus: imageStatus);
+  }
+
+  /// GET {base}/userfoods/{id} — re-reads a single food row and returns its
+  /// current `foodImage`, or null if absent. Used to poll for the product
+  /// image the barcode endpoint fetches from OpenFoodFacts asynchronously
+  /// (imageStatus == "fetching"): the row starts with a NULL image and gets
+  /// backfilled a moment later.
+  Future<String?> fetchFoodImageUrl(int id, String jwt) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) return null;
+    final res = await _client.get(
+      Uri.parse('$base/userfoods/$id'),
+      headers: {'Authorization': 'Bearer $jwt'},
+    );
+    if (res.statusCode != 200) return null;
+    final decoded = jsonDecode(res.body);
+    if (decoded is Map<String, dynamic>) {
+      return ScannedFood._nonEmpty(decoded['foodImage']);
+    }
+    return null;
   }
 
   void dispose() => _client.close();
