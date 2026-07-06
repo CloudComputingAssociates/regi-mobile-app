@@ -312,6 +312,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             // Red reticle — only while the camera is live, so the user knows
             // where to aim.
             if (_scanning) _redReticle(),
+            // Zoom slider — only when the camera advertises a zoom range. Lets
+            // the user fill the frame with a short/small barcode from a
+            // focusable distance instead of moving in until it blurs.
+            if (_scanning && _scanner.zoomSupported) _zoomSlider(),
             // Opaque idle panel — camera stays off until Scan is pressed.
             if (!_scanning && !_busy)
               Container(
@@ -737,6 +741,47 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  /// Vertical zoom slider pinned to the right edge of the live preview. Shown
+  /// only when the camera advertises a zoom range (see [_scannerBox]). A zoom
+  /// icon caps the top so the control reads as magnification, not brightness.
+  Widget _zoomSlider() {
+    final min = _scanner.zoomMin;
+    final max = _scanner.zoomMax;
+    final value = _scanner.zoom.clamp(min, max);
+    return Positioned(
+      top: 14,
+      bottom: 14,
+      right: 2,
+      child: Column(
+        children: [
+          const Icon(Icons.zoom_in, color: Colors.white70, size: 22),
+          Expanded(
+            child: RotatedBox(
+              quarterTurns: 3,
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: _scanRed,
+                  inactiveTrackColor: Colors.white30,
+                  thumbColor: _scanRed,
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                ),
+                child: Slider(
+                  min: min,
+                  max: max,
+                  value: value,
+                  onChanged: (v) {
+                    unawaited(_scanner.setZoom(v));
+                    setState(() {});
+                  },
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

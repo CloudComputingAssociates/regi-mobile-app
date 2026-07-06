@@ -6,11 +6,20 @@ import 'package:flutter/widgets.dart';
 class UpcScannerController {
   static bool get isSupported => false;
 
+  // Camera zoom mirrors the web controller's API so the shared screen code
+  // compiles for the VM/native targets. Never supported off-web.
+  bool get zoomSupported => false;
+  double get zoomMin => 1.0;
+  double get zoomMax => 1.0;
+  double get zoom => 1.0;
+
   Widget buildPreview() => const SizedBox.shrink();
 
   Future<void> start({required void Function(String code) onDetect}) async {
     throw UnsupportedError('UPC scanning is only available on the web build.');
   }
+
+  Future<void> setZoom(double value) async {}
 
   Future<void> stop() async {}
 
