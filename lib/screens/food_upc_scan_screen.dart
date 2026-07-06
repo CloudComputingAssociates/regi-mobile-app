@@ -7,6 +7,7 @@ import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
 import '../services/user_food_service.dart';
+import '../widgets/close_disk_button.dart';
 // Conditional: real BarcodeDetector-backed scanner on web, unsupported stub
 // elsewhere. See services/upc_scanner_web.dart for why mobile_scanner can't
 // read UPC codes on web.
@@ -246,6 +247,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       appBar: AppBar(
         backgroundColor: _bg,
         foregroundColor: Colors.white,
+        // No back arrow — closing is the red X disc at upper-right, so it can't
+        // be mistaken for in-screen navigation.
+        automaticallyImplyLeading: false,
         title: const Text('Food UPC scan'),
         actions: [
           // Save appears only for a category-only edit (a pending photo carries
@@ -257,6 +261,8 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               icon: const Icon(Icons.check, color: _scanRed),
               onPressed: _save,
             ),
+          // Close (rightmost = the corner).
+          CloseDiskButton(onClose: () => Navigator.of(context).maybePop()),
         ],
       ),
       body: SingleChildScrollView(

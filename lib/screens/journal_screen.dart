@@ -14,6 +14,7 @@ import '../services/glp1_service.dart';
 import '../services/journal_service.dart';
 import '../services/stt_service.dart';
 import '../utils/ptt_layout.dart';
+import '../widgets/close_disk_button.dart';
 import '../widgets/journal_calendar_picker.dart';
 
 /// Standalone Journal screen pushed onto the root Navigator. Owns the
@@ -900,7 +901,13 @@ class _JournalScreenState extends State<JournalScreen>
       appBar: AppBar(
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
+        // No back arrow — it collided visually with the calendar's date
+        // arrows. Closing is the red X disc at upper-right.
+        automaticallyImplyLeading: false,
         title: const Text('Journal Entry'),
+        actions: [
+          CloseDiskButton(onClose: () => Navigator.of(context).maybePop()),
+        ],
       ),
       body: _isLoading
           ? const Center(
