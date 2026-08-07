@@ -6,6 +6,7 @@ import 'screens/chat_screen.dart';
 import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
 import 'state/chat_state.dart';
+import 'tether_lifecycle.dart';
 import 'widgets/mode_slider.dart';
 
 class RegiChatApp extends StatefulWidget {
@@ -18,6 +19,7 @@ class RegiChatApp extends StatefulWidget {
 class _RegiChatAppState extends State<RegiChatApp> {
   final AuthService _auth = AuthService();
   final ChatState _chat = ChatState();
+  late final TetherLifecycle _tether;
   bool _bootstrapped = false;
   String? _bootstrapError;
 
@@ -25,6 +27,17 @@ class _RegiChatAppState extends State<RegiChatApp> {
   void initState() {
     super.initState();
     _bootstrap();
+    // App-root presence driver. Attaches the lifecycle observer + auth listener
+    // now (before _bootstrap's initialize() resolves), so the login transition
+    // that restores credentials starts the register+stamp loop. Mobile-only.
+    _tether = TetherLifecycle(_auth);
+    _tether.start();
+  }
+
+  @override
+  void dispose() {
+    _tether.dispose();
+    super.dispose();
   }
 
   Future<void> _bootstrap() async {
