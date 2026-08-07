@@ -1,9 +1,9 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'services/auth_service.dart';
+import 'services/desktop_browser.dart';
 import 'services/tether_identity.dart';
 import 'services/tether_service.dart';
 
@@ -23,8 +23,13 @@ import 'services/tether_service.dart';
 /// liveness window; we never call an "offline" endpoint. Logout cancels the
 /// loop but keeps the durable deviceInstanceId.
 ///
-/// MOBILE-ONLY: on web this is a hard no-op — a web build must NEVER register or
-/// poll (no web MobileDevices row should ever exist).
+/// Tether runs by DEFAULT on every client — phone PWA (installed or in-browser),
+/// native, iPad, etc. The ONLY session that is suppressed is a DESKTOP-CLASS
+/// BROWSER belonging to a NON-privileged user: that's the web cockpit, which
+/// only READS presence and must never register itself as a phone. Admin /
+/// Developer / QA users MAY tether from a desktop browser (testing), so the
+/// predicate is re-evaluated at every auth-gated point — a user who logs in as
+/// Admin on desktop then starts tethering. See [_tetherSuppressed].
 ///
 /// All register/poll failures are swallowed (debugPrint only) — a presence
 /// heartbeat must never interrupt the user; the timer self-heals next tick.
@@ -47,10 +52,17 @@ class TetherLifecycle with WidgetsBindingObserver {
 
   static const int _defaultPollSeconds = 3;
 
+  /// Suppress tether ONLY for a desktop-class browser session owned by a
+  /// non-privileged user (the web cockpit). Everything else — phone PWA,
+  /// native, tablet, or a privileged user testing from desktop — tethers.
+  /// Evaluated live (not cached) so a mid-session login as Admin flips it.
+  bool get _tetherSuppressed => isDesktopBrowser() && !_auth.isPrivileged;
+
   /// Attach the observer + auth listener and evaluate once (covers app-start
-  /// while already authenticated). Hard no-op on web.
+  /// while already authenticated). Attaches on every client — the suppression
+  /// decision is made per-action in [_registerStampAndLoop], not here, so a
+  /// later privilege change (login as Admin) can still start the loop.
   void start() {
-    if (kIsWeb) return;
     if (_started) return;
     _started = true;
     WidgetsBinding.instance.addObserver(this);
@@ -63,7 +75,6 @@ class TetherLifecycle with WidgetsBindingObserver {
 
   /// Detach everything. Called from the root widget's dispose().
   void dispose() {
-    if (kIsWeb) return;
     if (!_started) return;
     _auth.removeListener(_onAuthChanged);
     WidgetsBinding.instance.removeObserver(this);
@@ -87,7 +98,6 @@ class TetherLifecycle with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (kIsWeb) return;
     if (state == AppLifecycleState.resumed) {
       if (_auth.isAuthenticated) unawaited(_registerStampAndLoop());
     } else {
@@ -100,6 +110,10 @@ class TetherLifecycle with WidgetsBindingObserver {
   /// Register (idempotent upsert on EVERY start/resume/login), persist the
   /// returned deviceId, stamp immediately, then (re)start the interval timer.
   Future<void> _registerStampAndLoop() async {
+    // Single suppression point: covers start / login-notify / resume, since all
+    // three funnel through here. A non-privileged desktop browser never gets a
+    // MobileDevices row.
+    if (_tetherSuppressed) return;
     final jwt = await _auth.getAccessToken();
     if (jwt == null) return; // not authed — no presence.
     int? deviceId;

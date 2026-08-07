@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:auth0_flutter/auth0_flutter.dart';
 import 'package:auth0_flutter/auth0_flutter_web.dart';
@@ -16,6 +17,41 @@ class AuthService extends ChangeNotifier {
 
   bool get isAuthenticated => _credentials != null;
   UserProfile? get currentUser => _credentials?.user;
+
+  /// Auth0 namespaced custom claim carrying the user's roles. Mirrors the web
+  /// app's RoleService (regi-app). Values: Admin | Developer | QA.
+  static const String _rolesClaim = 'https://api.regimenu.net/roles';
+
+  /// Roles decoded from the ID-token custom claim. Empty when unauthed or the
+  /// claim is absent/malformed — never throws.
+  List<String> get roles {
+    final idToken = _credentials?.idToken;
+    if (idToken == null) return const [];
+    final claims = _decodeJwtPayload(idToken);
+    final raw = claims?[_rolesClaim];
+    if (raw is List) return raw.whereType<String>().toList(growable: false);
+    return const [];
+  }
+
+  /// True if the user holds any role that may run the tether from a desktop
+  /// browser (testing). Normal users on a desktop browser do not tether.
+  bool get isPrivileged =>
+      roles.any((r) => r == 'Admin' || r == 'Developer' || r == 'QA');
+
+  /// Best-effort decode of a JWT payload (segment 2) into a claims map.
+  /// Returns null on any malformed input — claim reading must never throw.
+  static Map<String, dynamic>? _decodeJwtPayload(String jwt) {
+    try {
+      final parts = jwt.split('.');
+      if (parts.length != 3) return null;
+      // JWT payloads are base64url without padding; normalize before decode.
+      final decoded = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final map = jsonDecode(decoded);
+      return map is Map<String, dynamic> ? map : null;
+    } catch (_) {
+      return null;
+    }
+  }
 
   String get _domain => Config.auth0Domain;
   String get _clientId => Config.auth0ClientId;
