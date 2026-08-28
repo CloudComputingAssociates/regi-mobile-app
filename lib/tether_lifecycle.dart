@@ -1,8 +1,11 @@
 import 'dart:async';
 
 import 'package:flutter/widgets.dart';
+import 'package:image_picker/image_picker.dart';
 
+import 'models/tether.dart';
 import 'services/auth_service.dart';
+import 'services/avatar_service.dart';
 import 'services/desktop_browser.dart';
 import 'services/tether_identity.dart';
 import 'services/tether_service.dart';
@@ -38,17 +41,30 @@ class TetherLifecycle with WidgetsBindingObserver {
     this._auth, {
     TetherService? service,
     TetherIdentity? identity,
+    AvatarService? avatarService,
+    ImagePicker? imagePicker,
   })  : _service = service ?? TetherService(),
-        _identity = identity ?? TetherIdentity();
+        _identity = identity ?? TetherIdentity(),
+        _avatarService = avatarService ?? AvatarService(),
+        _imagePicker = imagePicker ?? ImagePicker();
 
   final AuthService _auth;
   final TetherService _service;
   final TetherIdentity _identity;
+  final AvatarService _avatarService;
+  final ImagePicker _imagePicker;
 
   Timer? _timer;
   int _pollIntervalSeconds = _defaultPollSeconds;
   bool _started = false;
   bool _authWasAuthenticated = false;
+
+  /// At-most-once command bookkeeping. [_handledCommandIds] dedups a commandId
+  /// that a duplicate/retried poll might surface twice; [_handlingCommand]
+  /// prevents a second poll tick from opening the camera again while a capture
+  /// is already in flight (the loop keeps stamping every few seconds).
+  final Set<String> _handledCommandIds = {};
+  bool _handlingCommand = false;
 
   static const int _defaultPollSeconds = 3;
 
@@ -80,6 +96,7 @@ class TetherLifecycle with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _cancelTimer();
     _service.dispose();
+    _avatarService.dispose();
     _started = false;
   }
 
@@ -142,11 +159,65 @@ class TetherLifecycle with WidgetsBindingObserver {
       _cancelTimer();
       return;
     }
+    TetherPollResponse res;
     try {
-      await _service.poll(deviceId, jwt);
+      res = await _service.poll(deviceId, jwt);
     } catch (e) {
       debugPrint('TetherLifecycle: poll failed (ignored) — $e');
       // Swallow — the timer keeps running; a transient blip self-heals.
+      return;
+    }
+    _dispatchCommand(res.command);
+  }
+
+  /// Route an at-most-once device command from a poll response. Unknown types
+  /// are ignored; a commandId we've already handled (or one currently in
+  /// flight) is skipped so we never double-fire the camera.
+  void _dispatchCommand(TetherCommand? command) {
+    if (command == null) return;
+    if (_handledCommandIds.contains(command.commandId)) return;
+    if (_handlingCommand) return;
+    switch (command.type) {
+      case 'captureAvatar':
+        _handledCommandIds.add(command.commandId);
+        unawaited(_handleCaptureAvatar());
+        break;
+      default:
+        // Unknown command type — mark handled so we don't re-log it forever.
+        _handledCommandIds.add(command.commandId);
+        debugPrint('TetherLifecycle: ignoring unknown command ${command.type}');
+    }
+  }
+
+  /// Open the camera, capture a photo, and upload it as the authenticated
+  /// user's avatar. Permission denial / user-cancel returns null from the
+  /// picker → abort quietly (no crash). All failures are swallowed with a
+  /// debugPrint; the command is at-most-once, so on any miss the user simply
+  /// retries from the web cockpit.
+  Future<void> _handleCaptureAvatar() async {
+    _handlingCommand = true;
+    try {
+      final XFile? xfile;
+      try {
+        xfile = await _imagePicker.pickImage(source: ImageSource.camera);
+      } catch (e) {
+        // Permission denied / no camera / platform error — abort quietly.
+        debugPrint('TetherLifecycle: avatar capture cancelled — $e');
+        return;
+      }
+      if (xfile == null) return; // user cancelled
+      final bytes = await xfile.readAsBytes();
+      final jwt = await _auth.getAccessToken();
+      if (jwt == null) {
+        debugPrint('TetherLifecycle: avatar upload skipped — no token');
+        return;
+      }
+      await _avatarService.uploadAvatar(bytes, xfile.name, jwt);
+      debugPrint('TetherLifecycle: avatar uploaded');
+    } catch (e) {
+      debugPrint('TetherLifecycle: avatar upload failed (ignored) — $e');
+    } finally {
+      _handlingCommand = false;
     }
   }
 
