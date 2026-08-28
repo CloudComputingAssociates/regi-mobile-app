@@ -23,12 +23,17 @@ class AvatarService {
 
   final http.Client _client;
 
-  /// POST {base}/image/upload/avatar as multipart/form-data. Field name is
-  /// `image`; the part Content-Type is hard-coded to image/jpeg
-  /// (image_picker re-encodes to JPEG). The overall request Content-Type
-  /// (multipart with boundary) is set by MultipartRequest itself. The
-  /// response body is ignored beyond the status code — the caller only
-  /// needs to know it succeeded.
+  /// POST {base}/image/upload/avatar as multipart/form-data. Config.apiBaseUrl
+  /// already ends in /api, so this resolves to `{origin}/api/image/upload/avatar`
+  /// per the API contract. Fields:
+  ///   • `image`  — the JPEG bytes (field name MUST be "image")
+  ///   • `source` — hard-coded "user" per the contract
+  /// The part Content-Type is hard-coded to image/jpeg (image_picker re-encodes
+  /// to JPEG). The overall request Content-Type (multipart with boundary) is set
+  /// by MultipartRequest itself. The avatar is bound to the JWT user server-side,
+  /// so NO userId is sent. Response is `{ success, cdn_url, thumbnail_url }`;
+  /// nothing needs persisting (web re-hydrates via GET /user/profile), so the
+  /// body is ignored beyond the status code.
   Future<void> uploadAvatar(
     Uint8List bytes,
     String filename,
@@ -43,6 +48,7 @@ class AvatarService {
       Uri.parse('$base/image/upload/avatar'),
     )
       ..headers['Authorization'] = 'Bearer $jwt'
+      ..fields['source'] = 'user'
       ..files.add(http.MultipartFile.fromBytes(
         'image',
         bytes,
