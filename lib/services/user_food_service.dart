@@ -191,6 +191,7 @@ class UserFoodService {
     String jwt,
     List<int> bytes, {
     String filename = 'photo.jpg',
+    String source = 'user',
   }) async {
     final base = Config.apiBaseUrl;
     if (base.isEmpty) {
@@ -201,7 +202,7 @@ class UserFoodService {
       Uri.parse('$base/image/upload/product'),
     )
       ..headers['Authorization'] = 'Bearer $jwt'
-      ..fields['source'] = 'user'
+      ..fields['source'] = source
       ..fields['foodId'] = '$id'
       // No content-type on the part: the API sniffs the image format from the
       // bytes (image.Decode), so the multipart part's MIME type is ignored.

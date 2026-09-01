@@ -9,6 +9,7 @@ import 'services/avatar_service.dart';
 import 'services/desktop_browser.dart';
 import 'services/tether_identity.dart';
 import 'services/tether_service.dart';
+import 'services/user_food_service.dart';
 
 /// Presence driver for Phase 1 Mobile Tether — the WRITE side that makes the
 /// web indicator light up. Attached at APP ROOT so presence reflects the whole
@@ -42,11 +43,13 @@ class TetherLifecycle with WidgetsBindingObserver {
     TetherService? service,
     TetherIdentity? identity,
     AvatarService? avatarService,
+    UserFoodService? userFoodService,
     ImagePicker? imagePicker,
     GlobalKey<ScaffoldMessengerState>? messengerKey,
   })  : _service = service ?? TetherService(),
         _identity = identity ?? TetherIdentity(),
         _avatarService = avatarService ?? AvatarService(),
+        _userFoodService = userFoodService ?? UserFoodService(),
         _imagePicker = imagePicker ?? ImagePicker(),
         _messengerKey = messengerKey;
 
@@ -54,6 +57,7 @@ class TetherLifecycle with WidgetsBindingObserver {
   final TetherService _service;
   final TetherIdentity _identity;
   final AvatarService _avatarService;
+  final UserFoodService _userFoodService;
   final ImagePicker _imagePicker;
 
   /// Optional handle to the app-root ScaffoldMessenger so this context-less
@@ -103,6 +107,7 @@ class TetherLifecycle with WidgetsBindingObserver {
     _cancelTimer();
     _service.dispose();
     _avatarService.dispose();
+    _userFoodService.dispose();
     _started = false;
   }
 
@@ -188,6 +193,10 @@ class TetherLifecycle with WidgetsBindingObserver {
         _handledCommandIds.add(command.commandId);
         unawaited(_handleCaptureAvatar());
         break;
+      case 'captureMeal':
+        _handledCommandIds.add(command.commandId);
+        unawaited(_handleCaptureMeal(command.mealId));
+        break;
       default:
         // Unknown command type — mark handled so we don't re-log it forever.
         _handledCommandIds.add(command.commandId);
@@ -232,6 +241,57 @@ class TetherLifecycle with WidgetsBindingObserver {
     } catch (e) {
       debugPrint('TetherLifecycle: avatar upload failed (ignored) — $e');
       _toast('Avatar upload failed — retry from the web app');
+    } finally {
+      _handlingCommand = false;
+    }
+  }
+
+  /// Open the camera, capture a photo, and upload it as the product image for
+  /// the [mealId] user food. Mirrors [_handleCaptureAvatar]: same downscale,
+  /// same re-entrancy guard (set by the dispatcher, cleared here), same
+  /// quiet-abort on cancel/permission-denial. A null mealId (malformed
+  /// command) is ignored. Upload posts to /image/upload/product with
+  /// source=meal + foodId=mealId. At-most-once: on any miss the web user
+  /// re-fires from the meal.
+  Future<void> _handleCaptureMeal(int? mealId) async {
+    _handlingCommand = true;
+    try {
+      if (mealId == null) {
+        debugPrint('TetherLifecycle: captureMeal ignored — no mealId');
+        return;
+      }
+      final XFile? xfile;
+      try {
+        xfile = await _imagePicker.pickImage(
+          source: ImageSource.camera,
+          maxWidth: 1280,
+          maxHeight: 1280,
+          imageQuality: 85,
+        );
+      } catch (e) {
+        // Permission denied / no camera / platform error — abort quietly.
+        debugPrint('TetherLifecycle: meal capture cancelled — $e');
+        return;
+      }
+      if (xfile == null) return; // user cancelled
+      final bytes = await xfile.readAsBytes();
+      final jwt = await _auth.getAccessToken();
+      if (jwt == null) {
+        debugPrint('TetherLifecycle: meal upload skipped — no token');
+        return;
+      }
+      await _userFoodService.uploadProductImage(
+        mealId,
+        jwt,
+        bytes,
+        filename: xfile.name,
+        source: 'meal',
+      );
+      debugPrint('TetherLifecycle: meal photo uploaded');
+      _toast('Meal photo updated');
+    } catch (e) {
+      debugPrint('TetherLifecycle: meal upload failed (ignored) — $e');
+      _toast('Meal photo upload failed — retry from the web app');
     } finally {
       _handlingCommand = false;
     }
