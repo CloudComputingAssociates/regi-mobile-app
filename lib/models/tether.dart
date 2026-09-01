@@ -62,33 +62,20 @@ class TetherPollRequest {
 /// case a retry/duplicate poll surfaces it twice. `type` is the discriminator
 /// (e.g. 'captureAvatar'); unknown types are ignored by the client.
 class TetherCommand {
-  const TetherCommand({
-    required this.type,
-    required this.commandId,
-    this.mealId,
-  });
+  const TetherCommand({required this.type, required this.commandId});
 
   final String type;
   final String commandId;
 
-  /// Target meal (user food) id for a 'captureMeal' command — absent for
-  /// commands that don't need it (e.g. 'captureAvatar').
-  final int? mealId;
-
-  /// Returns null unless BOTH type and commandId are present, non-empty
-  /// strings — a partial/garbled command is treated as no command rather than
-  /// crashing the poll loop. mealId is optional and parsed when present.
+  /// Returns null unless BOTH fields are present, non-empty strings — a
+  /// partial/garbled command is treated as no command rather than crashing
+  /// the poll loop.
   static TetherCommand? fromJson(Map<String, dynamic> json) {
     final type = json['type'];
     final commandId = json['commandId'];
     if (type is! String || type.isEmpty) return null;
     if (commandId is! String || commandId.isEmpty) return null;
-    final rawMealId = json['mealId'];
-    return TetherCommand(
-      type: type,
-      commandId: commandId,
-      mealId: rawMealId is num ? rawMealId.toInt() : null,
-    );
+    return TetherCommand(type: type, commandId: commandId);
   }
 }
 

@@ -28,6 +28,7 @@ import '../services/glp1_service.dart';
 import '../utils/ptt_layout.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
+import 'camera_screen.dart';
 import 'food_upc_scan_screen.dart';
 import 'journal_screen.dart';
 import 'settings_screen.dart';
@@ -920,6 +921,22 @@ class _ChatScreenState extends State<ChatScreen> {
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => const FoodUpcScanScreen(),
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading:
+                    const Icon(Icons.photo_camera, color: Colors.white),
+                title: const Text(
+                  'Camera',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const CameraScreen(),
                     ),
                   );
                 },
