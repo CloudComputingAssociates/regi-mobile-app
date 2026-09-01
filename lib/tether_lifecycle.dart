@@ -178,6 +178,8 @@ class TetherLifecycle with WidgetsBindingObserver {
       // Swallow — the timer keeps running; a transient blip self-heals.
       return;
     }
+    debugPrint(
+        'TETHER poll command: type=${res.command?.type} mealId=${res.command?.mealId}');
     _dispatchCommand(res.command);
   }
 
@@ -194,6 +196,7 @@ class TetherLifecycle with WidgetsBindingObserver {
         unawaited(_handleCaptureAvatar());
         break;
       case 'captureMeal':
+        debugPrint('TETHER captureMeal fire mealId=${command.mealId}');
         _handledCommandIds.add(command.commandId);
         unawaited(_handleCaptureMeal(command.mealId));
         break;
@@ -254,6 +257,7 @@ class TetherLifecycle with WidgetsBindingObserver {
   /// source=meal + foodId=mealId. At-most-once: on any miss the web user
   /// re-fires from the meal.
   Future<void> _handleCaptureMeal(int? mealId) async {
+    debugPrint('TETHER captureMeal fire mealId=$mealId');
     _handlingCommand = true;
     try {
       if (mealId == null) {
