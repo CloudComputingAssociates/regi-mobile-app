@@ -19,8 +19,6 @@ class RegiChatApp extends StatefulWidget {
 class _RegiChatAppState extends State<RegiChatApp> {
   final AuthService _auth = AuthService();
   final ChatState _chat = ChatState();
-  final GlobalKey<ScaffoldMessengerState> _messengerKey =
-      GlobalKey<ScaffoldMessengerState>();
   late final TetherLifecycle _tether;
   bool _bootstrapped = false;
   String? _bootstrapError;
@@ -32,7 +30,7 @@ class _RegiChatAppState extends State<RegiChatApp> {
     // App-root presence driver. Attaches the lifecycle observer + auth listener
     // now (before _bootstrap's initialize() resolves), so the login transition
     // that restores credentials starts the register+stamp loop. Mobile-only.
-    _tether = TetherLifecycle(_auth, messengerKey: _messengerKey);
+    _tether = TetherLifecycle(_auth);
     _tether.start();
   }
 
@@ -61,7 +59,6 @@ class _RegiChatAppState extends State<RegiChatApp> {
         ChangeNotifierProvider<ChatState>.value(value: _chat),
       ],
       child: MaterialApp(
-        scaffoldMessengerKey: _messengerKey,
         title: kIsWeb ? 'Mobile App' : 'RegiMenu',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(

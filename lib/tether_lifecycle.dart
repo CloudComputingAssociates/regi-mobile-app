@@ -1,11 +1,8 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:flutter/widgets.dart';
 
-import 'models/tether.dart';
 import 'services/auth_service.dart';
-import 'services/avatar_service.dart';
 import 'services/desktop_browser.dart';
 import 'services/tether_identity.dart';
 import 'services/tether_service.dart';
@@ -41,36 +38,17 @@ class TetherLifecycle with WidgetsBindingObserver {
     this._auth, {
     TetherService? service,
     TetherIdentity? identity,
-    AvatarService? avatarService,
-    ImagePicker? imagePicker,
-    GlobalKey<ScaffoldMessengerState>? messengerKey,
   })  : _service = service ?? TetherService(),
-        _identity = identity ?? TetherIdentity(),
-        _avatarService = avatarService ?? AvatarService(),
-        _imagePicker = imagePicker ?? ImagePicker(),
-        _messengerKey = messengerKey;
+        _identity = identity ?? TetherIdentity();
 
   final AuthService _auth;
   final TetherService _service;
   final TetherIdentity _identity;
-  final AvatarService _avatarService;
-  final ImagePicker _imagePicker;
-
-  /// Optional handle to the app-root ScaffoldMessenger so this context-less
-  /// lifecycle can surface a brief toast on avatar capture success/failure.
-  final GlobalKey<ScaffoldMessengerState>? _messengerKey;
 
   Timer? _timer;
   int _pollIntervalSeconds = _defaultPollSeconds;
   bool _started = false;
   bool _authWasAuthenticated = false;
-
-  /// At-most-once command bookkeeping. [_handledCommandIds] dedups a commandId
-  /// that a duplicate/retried poll might surface twice; [_handlingCommand]
-  /// prevents a second poll tick from opening the camera again while a capture
-  /// is already in flight (the loop keeps stamping every few seconds).
-  final Set<String> _handledCommandIds = {};
-  bool _handlingCommand = false;
 
   static const int _defaultPollSeconds = 3;
 
@@ -102,7 +80,6 @@ class TetherLifecycle with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _cancelTimer();
     _service.dispose();
-    _avatarService.dispose();
     _started = false;
   }
 
@@ -159,94 +136,23 @@ class TetherLifecycle with WidgetsBindingObserver {
     _startTimer(deviceId);
   }
 
+  /// The presence heartbeat: stamp LastSeenUtc for this device. Tether is
+  /// PRESENCE-ONLY — it carries no commands. Command delivery lives entirely on
+  /// the mobile bus (regi.mobile.requests → api pending store → the Phone panel
+  /// pulls over HTTP). Presence exists only so the web can GATE the ask: it
+  /// won't let a user request a capture unless it can see this phone live.
   Future<void> _stamp(int deviceId) async {
     final jwt = await _auth.getAccessToken();
     if (jwt == null) {
       _cancelTimer();
       return;
     }
-    TetherPollResponse res;
     try {
-      res = await _service.poll(deviceId, jwt);
+      await _service.poll(deviceId, jwt);
     } catch (e) {
       debugPrint('TetherLifecycle: poll failed (ignored) — $e');
       // Swallow — the timer keeps running; a transient blip self-heals.
-      return;
     }
-    _dispatchCommand(res.command);
-  }
-
-  /// Route an at-most-once device command from a poll response. Unknown types
-  /// are ignored; a commandId we've already handled (or one currently in
-  /// flight) is skipped so we never double-fire the camera.
-  void _dispatchCommand(TetherCommand? command) {
-    if (command == null) return;
-    if (_handledCommandIds.contains(command.commandId)) return;
-    if (_handlingCommand) return;
-    switch (command.type) {
-      case 'captureAvatar':
-        _handledCommandIds.add(command.commandId);
-        unawaited(_handleCaptureAvatar());
-        break;
-      default:
-        // Unknown command type — mark handled so we don't re-log it forever.
-        _handledCommandIds.add(command.commandId);
-        debugPrint('TetherLifecycle: ignoring unknown command ${command.type}');
-    }
-  }
-
-  /// Open the camera, capture a photo, and upload it as the authenticated
-  /// user's avatar. Permission denial / user-cancel returns null from the
-  /// picker → abort quietly (no crash). All failures are swallowed with a
-  /// debugPrint; the command is at-most-once, so on any miss the user simply
-  /// retries from the web cockpit.
-  Future<void> _handleCaptureAvatar() async {
-    _handlingCommand = true;
-    try {
-      final XFile? xfile;
-      try {
-        // Downscale at capture: the server resizes to 720×720 + an 80×80 thumb,
-        // so a ~1–2MP JPEG is plenty and stays well under the 10MB cap. These
-        // params make image_picker re-encode/resize before we ever read bytes.
-        xfile = await _imagePicker.pickImage(
-          source: ImageSource.camera,
-          maxWidth: 1280,
-          maxHeight: 1280,
-          imageQuality: 85,
-        );
-      } catch (e) {
-        // Permission denied / no camera / platform error — abort quietly.
-        debugPrint('TetherLifecycle: avatar capture cancelled — $e');
-        return;
-      }
-      if (xfile == null) return; // user cancelled
-      final bytes = await xfile.readAsBytes();
-      final jwt = await _auth.getAccessToken();
-      if (jwt == null) {
-        debugPrint('TetherLifecycle: avatar upload skipped — no token');
-        return;
-      }
-      await _avatarService.uploadAvatar(bytes, xfile.name, jwt);
-      debugPrint('TetherLifecycle: avatar uploaded');
-      _toast('Avatar updated');
-    } catch (e) {
-      debugPrint('TetherLifecycle: avatar upload failed (ignored) — $e');
-      _toast('Avatar upload failed — retry from the web app');
-    } finally {
-      _handlingCommand = false;
-    }
-  }
-
-  /// Best-effort toast via the app-root messenger. No-op if no key was wired
-  /// or the messenger isn't mounted — a missed confirmation never matters.
-  void _toast(String message) {
-    final messenger = _messengerKey?.currentState;
-    if (messenger == null) return;
-    messenger
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(content: Text(message), duration: const Duration(seconds: 3)),
-      );
   }
 
   void _startTimer(int deviceId) {

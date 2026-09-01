@@ -5,23 +5,28 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../services/auth_service.dart';
-import '../services/camera_request_service.dart';
+import '../services/avatar_service.dart';
+import '../services/mobile_command_service.dart';
 import '../services/user_food_service.dart';
 import '../widgets/close_disk_button.dart';
 
-/// Standalone Camera screen, pushed onto the root Navigator from the drawer.
+/// The phone's capture surface — the "Phone panel" reached from the left-nav
+/// drawer. It is the one screen that fulfills a mobile-bus command.
 ///
-/// This is the phone half of the "take a phone pic of this meal" flow. The web
-/// app — only when it can see this device is tethered/live — queues a
-/// meal-photo request (a Kafka `camera-requests` message the api holds in a
-/// per-user pending store). The user then opens this screen, which pulls the
-/// pending request over HTTP (the browser can't read Kafka directly), shows
-/// which meal it's for, captures a photo in-app, and uploads it straight to
-/// that meal's product image (GCS + URI update happen server-side).
+/// Delivery is pull-based and durable: the web app (only when it can see this
+/// phone is tethered/live) drops a command on `regi.mobile.requests`; the api
+/// holds it in a per-user pending store; this panel pulls the next one over
+/// HTTP (the browser can't read Kafka), shows Title/Description of what it's
+/// capturing, takes the photo, uploads to the API by id for that command's
+/// type, then reports completion so the api clears the entry and emits a
+/// response event. If anything drops in between, the request persists in the
+/// queue and re-surfaces here — nothing pops the camera unbidden.
 ///
-/// No pending request → nothing to shoot; we show an empty state. That IS the
-/// "if something disconnects, protection" rule: with no queued request there's
-/// no meal to attach a photo to, so capture is inert.
+/// Command types handled:
+///   • camera.captureMeal   → payload.mealId → POST /image/upload/product
+///   • camera.captureAvatar → POST /image/upload/avatar
+///
+/// No pending command → empty state; there's simply nothing to capture.
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
 
@@ -33,13 +38,17 @@ class _CameraScreenState extends State<CameraScreen> {
   static const Color _bg = Color(0xFF1B1B1B);
   static const Color _scanRed = Color(0xFFFF3B30);
 
-  final CameraRequestService _requests = CameraRequestService();
-  final UserFoodService _foods = UserFoodService();
+  static const String _typeCaptureMeal = 'camera.captureMeal';
+  static const String _typeCaptureAvatar = 'camera.captureAvatar';
 
-  // True while the initial (or post-upload) pending-request fetch is in flight.
+  final MobileCommandService _commands = MobileCommandService();
+  final UserFoodService _foods = UserFoodService();
+  final AvatarService _avatars = AvatarService();
+
+  // True while the initial (or post-upload) pull is in flight.
   bool _loading = true;
-  // The meal we've been asked to photograph, or null when the queue is empty.
-  PendingMealPhoto? _request;
+  // The command we're currently fulfilling, or null when the queue is empty.
+  MobileCommand? _command;
   // A freshly-taken photo held for preview until the user commits it with
   // "Use photo". Cleared on retake and after a successful upload.
   Uint8List? _pendingPhoto;
@@ -49,20 +58,21 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   void initState() {
     super.initState();
-    _loadPending();
+    _loadNext();
   }
 
   @override
   void dispose() {
-    _requests.dispose();
+    _commands.dispose();
     _foods.dispose();
+    _avatars.dispose();
     super.dispose();
   }
 
-  /// Fetch the head of the meal-photo queue for this user. Runs on open and
-  /// again after each successful upload so a second queued request surfaces
-  /// without leaving the screen.
-  Future<void> _loadPending() async {
+  /// Pull the next queued command for this user. Runs on open and again after
+  /// each successful upload so a second queued request surfaces without
+  /// leaving the screen.
+  Future<void> _loadNext() async {
     final auth = context.read<AuthService>();
     setState(() {
       _loading = true;
@@ -76,19 +86,19 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
     try {
-      final req = await _requests.getPending(jwt);
+      final cmd = await _commands.getNext(jwt);
       if (!mounted) return;
       setState(() {
-        _request = req;
+        _command = cmd;
         _loading = false;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
-        _request = null;
+        _command = null;
         _loading = false;
       });
-      _toast('Couldn’t check for a photo request — try again.');
+      _toast('Couldn’t check for a request — try again.');
     }
   }
 
@@ -112,12 +122,12 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  /// Upload the committed photo to the requested meal's product image
-  /// (source=meal), then re-check the queue for the next request.
+  /// Upload the committed photo to the endpoint this command's type maps to,
+  /// report completion, then pull the next queued command.
   Future<void> _usePhoto() async {
-    final req = _request;
+    final cmd = _command;
     final photo = _pendingPhoto;
-    if (req == null || photo == null) return;
+    if (cmd == null || photo == null) return;
     final auth = context.read<AuthService>();
     setState(() => _saving = true);
     final jwt = await auth.getAccessToken();
@@ -128,18 +138,31 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
     try {
-      await _foods.uploadProductImage(req.mealId, jwt, photo, source: 'meal');
+      switch (cmd.type) {
+        case _typeCaptureMeal:
+          final mealId = cmd.mealId;
+          if (mealId == null) {
+            throw const FormatException('captureMeal without a mealId');
+          }
+          await _foods.uploadProductImage(mealId, jwt, photo, source: 'meal');
+          break;
+        case _typeCaptureAvatar:
+          await _avatars.uploadAvatar(photo, 'avatar.jpg', jwt);
+          break;
+        default:
+          throw FormatException('unsupported command type ${cmd.type}');
+      }
+      // Tell the api the capture landed so it clears the pending entry and
+      // emits the response event. Best-effort — a hiccup here just means the
+      // command may resurface on the next pull.
+      try {
+        await _commands.complete(cmd.commandId, jwt);
+      } catch (_) {/* non-fatal */}
       if (!mounted) return;
       setState(() => _saving = false);
-      _toast('Meal photo updated.');
-      // Server clears the pending request on a successful meal upload; refresh
-      // to pick up any next queued meal (or land on the empty state).
-      await _loadPending();
-    } on UserFoodException catch (e) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _toast('Upload failed (HTTP ${e.statusCode}).');
-    } catch (_) {
+      _toast('Photo uploaded.');
+      await _loadNext();
+    } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       _toast('Upload failed — check your connection and try again.');
@@ -165,7 +188,7 @@ class _CameraScreenState extends State<CameraScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white,
         automaticallyImplyLeading: false,
-        title: const Text('Camera'),
+        title: const Text('Phone'),
         actions: [
           CloseDiskButton(onClose: () => Navigator.of(context).maybePop()),
         ],
@@ -173,15 +196,14 @@ class _CameraScreenState extends State<CameraScreen> {
       body: SafeArea(
         child: _loading
             ? const Center(child: CircularProgressIndicator(color: _scanRed))
-            : _request == null
+            : _command == null
                 ? _emptyState()
-                : _requestBody(_request!),
+                : _commandBody(_command!),
       ),
     );
   }
 
-  /// No meal-photo request queued. The user reached the screen with nothing to
-  /// shoot — explain, and offer a manual re-check in case one arrived.
+  /// No command queued — the user opened the panel with nothing to shoot.
   Widget _emptyState() {
     return Center(
       child: Padding(
@@ -193,19 +215,19 @@ class _CameraScreenState extends State<CameraScreen> {
                 color: Colors.white24, size: 64),
             const SizedBox(height: 16),
             const Text(
-              'No meal photo requested',
+              'Nothing to capture',
               style: TextStyle(color: Colors.white, fontSize: 17),
             ),
             const SizedBox(height: 8),
             const Text(
-              'Pick a meal in the web app and tap “take phone pic”. '
+              'Ask from the web app (it has to see this phone connected). '
               'The request shows up here.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.white54, fontSize: 13),
             ),
             const SizedBox(height: 20),
             OutlinedButton.icon(
-              onPressed: _loadPending,
+              onPressed: _loadNext,
               icon: const Icon(Icons.refresh, size: 18),
               label: const Text('Check again'),
               style: OutlinedButton.styleFrom(
@@ -219,15 +241,19 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  Widget _requestBody(PendingMealPhoto req) {
+  Widget _commandBody(MobileCommand cmd) {
+    // Title/Description come resolved from the server so the phone can say what
+    // it's capturing without knowing the domain: "Meal Photo: Turkey & Lettuce…".
+    final heading = cmd.description.isEmpty
+        ? cmd.title
+        : '${cmd.title}: ${cmd.description}';
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Heading: which meal this photo is for.
           Text(
-            'Meal Photo: ${req.mealName}',
+            heading,
             style: const TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -311,7 +337,7 @@ class _CameraScreenState extends State<CameraScreen> {
           Icon(Icons.photo_camera, color: Colors.white24, size: 56),
           SizedBox(height: 8),
           Text(
-            'Tap “Take pic” to photograph this meal',
+            'Tap “Take pic” to capture',
             style: TextStyle(color: Colors.white38, fontSize: 13),
           ),
         ],
