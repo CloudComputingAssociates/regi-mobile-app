@@ -927,9 +927,9 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               ListTile(
                 leading:
-                    const Icon(Icons.smartphone, color: Colors.white),
+                    const Icon(Icons.photo_camera, color: Colors.white),
                 title: const Text(
-                  'Phone',
+                  'Camera',
                   style: TextStyle(color: Colors.white),
                 ),
                 onTap: () {

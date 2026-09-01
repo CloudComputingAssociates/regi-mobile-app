@@ -188,7 +188,7 @@ class _CameraScreenState extends State<CameraScreen> {
         backgroundColor: _bg,
         foregroundColor: Colors.white,
         automaticallyImplyLeading: false,
-        title: const Text('Phone'),
+        title: const Text('Camera'),
         actions: [
           CloseDiskButton(onClose: () => Navigator.of(context).maybePop()),
         ],
