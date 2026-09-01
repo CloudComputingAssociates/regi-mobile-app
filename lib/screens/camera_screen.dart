@@ -92,13 +92,24 @@ class _CameraScreenState extends State<CameraScreen> {
         _command = cmd;
         _loading = false;
       });
-    } catch (_) {
+    } on MobileCommandException catch (e) {
+      // The api answered, but not 200/204/404 — surface the status so a 401
+      // (token) reads differently from a 500 (server) or a route that 405s.
       if (!mounted) return;
       setState(() {
         _command = null;
         _loading = false;
       });
-      _toast('Couldn’t check for a request — try again.');
+      _toast('Request check failed: HTTP ${e.statusCode}');
+    } catch (e) {
+      // Never reached the api cleanly — network/CORS/DNS, or a route that
+      // returns no CORS headers (looks like a thrown error on web, not a 404).
+      if (!mounted) return;
+      setState(() {
+        _command = null;
+        _loading = false;
+      });
+      _toast('Request check error: $e');
     }
   }
 
