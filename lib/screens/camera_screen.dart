@@ -168,17 +168,19 @@ class _CameraScreenState extends State<CameraScreen> {
       _toast('Not authenticated.');
       return;
     }
+    // STEP 1 — upload the photo to the type's image endpoint.
+    Object? result;
+    String? cdnUrl;
     try {
-      Object? result;
       switch (cmd.type) {
         case _typeCaptureMeal:
           final mealId = cmd.mealId;
           if (mealId == null) {
             throw const FormatException('captureMeal without a mealId');
           }
-          final url =
-              await _foods.uploadProductImage(mealId, jwt, photo, source: 'meal');
-          if (url != null) result = {'cdnUrl': url};
+          cdnUrl = await _foods.uploadProductImage(mealId, jwt, photo,
+              source: 'meal');
+          if (cdnUrl != null) result = {'cdnUrl': cdnUrl};
           break;
         case _typeCaptureAvatar:
           await _avatars.uploadAvatar(photo, 'avatar.jpg', jwt);
@@ -186,22 +188,67 @@ class _CameraScreenState extends State<CameraScreen> {
         default:
           throw FormatException('unsupported command type ${cmd.type}');
       }
-      // Upload landed → ack done. Mark handled so a redelivery before the
-      // server cursor advances doesn't re-shoot it.
-      _handled.add(cmd.messageId);
-      await _tether.ack(deviceId, cmd.messageId, 'done', jwt, result: result);
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _toast('Photo uploaded.');
-      await _loadNext();
+      debugPrint('CAMERA upload OK type=${cmd.type} cdnUrl=$cdnUrl');
+    } on UserFoodException catch (e) {
+      _uploadFailed('Upload rejected: HTTP ${e.statusCode} ${_trim(e.body)}');
+      return;
+    } on AvatarException catch (e) {
+      _uploadFailed('Upload rejected: HTTP ${e.statusCode} ${_trim(e.body)}');
+      return;
     } catch (e) {
-      // Upload or ack failed — do NOT mark handled; the command redelivers on
-      // the next poll so the user can retry.
-      _handled.remove(cmd.messageId);
+      _uploadFailed('Upload error: $e');
+      return;
+    }
+
+    // A meal upload that returns 200 but NO cdn_url means the API didn't store
+    // to GCS — surface that instead of a false "done".
+    if (cmd.type == _typeCaptureMeal && cdnUrl == null) {
+      _uploadFailed('API accepted the upload but returned no image URL — '
+          'nothing was stored to GCS.');
+      return;
+    }
+
+    // STEP 2 — ack so the server advances its cursor and echoes the result to
+    // the web. Mark handled first so a redelivery mid-ack doesn't re-shoot.
+    _handled.add(cmd.messageId);
+    try {
+      await _tether.ack(deviceId, cmd.messageId, 'done', jwt, result: result);
+      debugPrint('CAMERA ack OK messageId=${cmd.messageId}');
+    } on TetherException catch (e) {
+      // Photo IS uploaded; only the ack failed. Don't unmark — re-acking is a
+      // safe no-op and we don't want to re-shoot. Tell the user plainly.
       if (!mounted) return;
       setState(() => _saving = false);
-      _toast('Upload failed — check your connection and try again.');
+      _toast('Uploaded ✓ but ack failed: HTTP ${e.statusCode} — '
+          'web may not refresh. ${_trim(e.body)}');
+      return;
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      _toast('Uploaded ✓ but ack error: $e');
+      return;
     }
+
+    if (!mounted) return;
+    setState(() => _saving = false);
+    _toast(cdnUrl != null ? 'Uploaded ✓ → $cdnUrl' : 'Uploaded ✓');
+    await _loadNext();
+  }
+
+  /// Common failure path for a failed upload: don't mark handled (so the
+  /// command redelivers for a retry), stop the spinner, surface the reason.
+  void _uploadFailed(String message) {
+    _handled.remove(_command?.messageId ?? '');
+    if (!mounted) return;
+    setState(() => _saving = false);
+    _toast(message);
+  }
+
+  /// Trim an API error body so a long HTML/JSON payload doesn't blow out the
+  /// toast.
+  static String _trim(String body) {
+    final s = body.replaceAll('\n', ' ').trim();
+    return s.length > 140 ? '${s.substring(0, 140)}…' : s;
   }
 
   void _toast(String msg) {
