@@ -146,6 +146,10 @@ class _CameraScreenState extends State<CameraScreen> {
       final bytes = await shot.readAsBytes();
       if (!mounted) return;
       setState(() => _pendingPhoto = bytes);
+      // Auto-upload: the camera already gave an accept/retake moment before the
+      // shot came back, so a second in-app confirm is redundant. Go straight to
+      // upload; on failure the photo stays with a Retake button.
+      await _usePhoto();
     } catch (e) {
       _toast('Camera unavailable: $e');
     }
@@ -339,6 +343,8 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
           const SizedBox(height: 16),
           _pictureBox(),
+          const SizedBox(height: 16),
+          _actionButton(),
         ],
       ),
     );
@@ -357,6 +363,9 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// Just the image (or placeholder) with an "Uploading…" overlay while the
+  /// upload is in flight. No buttons on the image — the action lives in the
+  /// full-width button below, so it can't be mistaken for part of the photo.
   Widget _pictureBox() {
     final pending = _pendingPhoto;
     return AspectRatio(
@@ -370,46 +379,19 @@ class _CameraScreenState extends State<CameraScreen> {
               Image.memory(pending, fit: BoxFit.cover)
             else
               _placeholder(),
-
-            // Button layer.
-            if (pending != null)
-              Positioned(
-                left: 10,
-                right: 10,
-                bottom: 10,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    _pillButton(
-                      onPressed: _saving ? null : _takePic,
-                      icon: Icons.refresh,
-                      label: 'Retake',
-                      filled: false,
-                    ),
-                    _pillButton(
-                      onPressed: _saving ? null : _usePhoto,
-                      icon: Icons.check,
-                      label: 'Use photo',
-                    ),
-                  ],
-                ),
-              )
-            else
-              Positioned(
-                right: 10,
-                bottom: 10,
-                child: _pillButton(
-                  onPressed: _saving ? null : _takePic,
-                  icon: Icons.photo_camera,
-                  label: 'Take pic',
-                ),
-              ),
-
             if (_saving)
               Container(
-                color: Colors.black45,
+                color: Colors.black54,
                 alignment: Alignment.center,
-                child: const CircularProgressIndicator(color: _scanRed),
+                child: const Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: _scanRed),
+                    SizedBox(height: 12),
+                    Text('Uploading…',
+                        style: TextStyle(color: Colors.white, fontSize: 14)),
+                  ],
+                ),
               ),
           ],
         ),
@@ -427,7 +409,7 @@ class _CameraScreenState extends State<CameraScreen> {
           Icon(Icons.photo_camera, color: Colors.white24, size: 56),
           SizedBox(height: 8),
           Text(
-            'Tap “Take pic” to capture',
+            'Tap the button below to take the photo',
             style: TextStyle(color: Colors.white38, fontSize: 13),
           ),
         ],
@@ -435,22 +417,36 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  Widget _pillButton({
-    required VoidCallback? onPressed,
-    required IconData icon,
-    required String label,
-    bool filled = true,
-  }) {
-    return ElevatedButton.icon(
-      onPressed: onPressed,
-      icon: Icon(icon, size: 18),
-      label: Text(label),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: filled ? _scanRed : Colors.black54,
-        foregroundColor: Colors.white,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
+  /// The one big, unmissable action under the image. Its label reflects state:
+  /// uploading, first capture, or retake-after-a-failed-upload (a leftover
+  /// _pendingPhoto with the spinner gone means the last upload failed).
+  Widget _actionButton() {
+    final retake = _pendingPhoto != null && !_saving;
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton.icon(
+        onPressed: _saving ? null : _takePic,
+        icon: Icon(_saving
+            ? Icons.hourglass_top
+            : retake
+                ? Icons.refresh
+                : Icons.photo_camera),
+        label: Text(_saving
+            ? 'Uploading…'
+            : retake
+                ? 'Retake & upload'
+                : 'Take photo'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: _scanRed,
+          foregroundColor: Colors.white,
+          disabledBackgroundColor: const Color(0xFF3A2A2A),
+          disabledForegroundColor: Colors.white38,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          textStyle:
+              const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
         ),
       ),
     );
