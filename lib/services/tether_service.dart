@@ -83,6 +83,40 @@ class TetherService {
     return TetherPollResponse.fromJson(decoded);
   }
 
+  /// POST {base}/tether/ack — advance this device's cursor past a handled
+  /// command so the server stops redelivering it, and publish the result to
+  /// the web. Idempotent: re-acking the same messageId is a safe 200 no-op.
+  /// [status] must be exactly 'done' or 'failed'. [result] is an optional
+  /// opaque JSON body echoed to the web (e.g. an upload ref); omitted when null.
+  Future<void> ack(
+    int deviceId,
+    String messageId,
+    String status,
+    String jwt, {
+    Object? result,
+  }) async {
+    final base = Config.apiBaseUrl;
+    if (base.isEmpty) {
+      throw TetherException(0, 'API_BASE_URL missing — pass via --dart-define');
+    }
+    final res = await _client.post(
+      Uri.parse('$base/tether/ack'),
+      headers: {
+        'Authorization': 'Bearer $jwt',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'deviceId': deviceId,
+        'messageId': messageId,
+        'status': status,
+        if (result != null) 'result': result,
+      }),
+    );
+    if (res.statusCode != 200) {
+      throw TetherException(res.statusCode, res.body);
+    }
+  }
+
   void dispose() {
     _client.close();
   }

@@ -4,27 +4,27 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
+import '../models/tether.dart';
 import '../services/auth_service.dart';
 import '../services/avatar_service.dart';
-import '../services/mobile_command_service.dart';
+import '../services/tether_identity.dart';
+import '../services/tether_service.dart';
 import '../services/user_food_service.dart';
 import '../widgets/close_disk_button.dart';
 
-/// The phone's capture surface — the "Phone panel" reached from the left-nav
-/// drawer. It is the one screen that fulfills a mobile-bus command.
+/// The phone's capture surface — the "Camera" screen reached from the left-nav
+/// drawer. It fulfills a device command the web app queued for this phone.
 ///
-/// Delivery is pull-based and durable: the web app (only when it can see this
-/// phone is tethered/live) drops a command on `regi.mobile.requests`; the api
-/// holds it in a per-user pending store; this panel pulls the next one over
-/// HTTP (the browser can't read Kafka), shows Title/Description of what it's
-/// capturing, takes the photo, uploads to the API by id for that command's
-/// type, then reports completion so the api clears the entry and emits a
-/// response event. If anything drops in between, the request persists in the
-/// queue and re-surfaces here — nothing pops the camera unbidden.
+/// TRANSPORT: commands ride the tether poll heartbeat (POST /api/tether/poll),
+/// at-least-once — the server redelivers a command every poll until we ack it
+/// (POST /api/tether/ack) or it TTL-expires. The app-root presence loop ignores
+/// commands; THIS screen is what polls, shows what's queued, captures, uploads
+/// to the API by id, then acks. Redelivery-until-ack is why nothing pops the
+/// camera unbidden: the request just waits here until the user fulfills it.
 ///
 /// Command types handled:
-///   • camera.captureMeal   → payload.mealId → POST /image/upload/product
-///   • camera.captureAvatar → POST /image/upload/avatar
+///   • captureMeal   → mealId → POST /image/upload/product (source=meal)
+///   • captureAvatar → POST /image/upload/avatar
 ///
 /// No pending command → empty state; there's simply nothing to capture.
 class CameraScreen extends StatefulWidget {
@@ -38,21 +38,28 @@ class _CameraScreenState extends State<CameraScreen> {
   static const Color _bg = Color(0xFF1B1B1B);
   static const Color _scanRed = Color(0xFFFF3B30);
 
-  static const String _typeCaptureMeal = 'camera.captureMeal';
-  static const String _typeCaptureAvatar = 'camera.captureAvatar';
+  static const String _typeCaptureMeal = 'captureMeal';
+  static const String _typeCaptureAvatar = 'captureAvatar';
 
-  final MobileCommandService _commands = MobileCommandService();
+  final TetherService _tether = TetherService();
+  final TetherIdentity _identity = TetherIdentity();
   final UserFoodService _foods = UserFoodService();
   final AvatarService _avatars = AvatarService();
 
-  // True while the initial (or post-upload) pull is in flight.
+  // Messages already fulfilled (acked) this session, so a redelivered command
+  // is ignored instead of re-shot. De-dupe key is the messageId.
+  final Set<String> _handled = {};
+
+  // True while a poll (initial or post-ack) is in flight.
   bool _loading = true;
-  // The command we're currently fulfilling, or null when the queue is empty.
+  // This device's server id (from tether register), needed to poll + ack.
+  int? _deviceId;
+  // The command we're currently fulfilling, or null when nothing's queued.
   MobileCommand? _command;
   // A freshly-taken photo held for preview until the user commits it with
   // "Use photo". Cleared on retake and after a successful upload.
   Uint8List? _pendingPhoto;
-  // Upload in flight.
+  // Upload + ack in flight.
   bool _saving = false;
 
   @override
@@ -63,38 +70,51 @@ class _CameraScreenState extends State<CameraScreen> {
 
   @override
   void dispose() {
-    _commands.dispose();
+    _tether.dispose();
     _foods.dispose();
     _avatars.dispose();
     super.dispose();
   }
 
-  /// Pull the next queued command for this user. Runs on open and again after
-  /// each successful upload so a second queued request surfaces without
-  /// leaving the screen.
+  /// Poll the heartbeat for queued commands and surface the first un-handled
+  /// one. Runs on open, on "Check again", and after each successful ack.
   Future<void> _loadNext() async {
     final auth = context.read<AuthService>();
     setState(() {
       _loading = true;
       _pendingPhoto = null;
     });
+    final deviceId = _deviceId ?? await _identity.savedDeviceId();
     final jwt = await auth.getAccessToken();
-    if (jwt == null) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      _toast('Not authenticated.');
-      return;
-    }
-    try {
-      final cmd = await _commands.getNext(jwt);
+    if (deviceId == null || jwt == null) {
       if (!mounted) return;
       setState(() {
-        _command = cmd;
+        _deviceId = deviceId;
+        _command = null;
         _loading = false;
       });
-    } on MobileCommandException catch (e) {
-      // The api answered, but not 200/204/404 — surface the status so a 401
-      // (token) reads differently from a 500 (server) or a route that 405s.
+      _toast(deviceId == null
+          ? 'This phone isn’t registered yet — reopen the app.'
+          : 'Not authenticated.');
+      return;
+    }
+    _deviceId = deviceId;
+    try {
+      final res = await _tether.poll(deviceId, jwt);
+      // First command we haven't already fulfilled this session.
+      MobileCommand? next;
+      for (final c in res.commands) {
+        if (!_handled.contains(c.messageId)) {
+          next = c;
+          break;
+        }
+      }
+      if (!mounted) return;
+      setState(() {
+        _command = next;
+        _loading = false;
+      });
+    } on TetherException catch (e) {
       if (!mounted) return;
       setState(() {
         _command = null;
@@ -102,8 +122,6 @@ class _CameraScreenState extends State<CameraScreen> {
       });
       _toast('Request check failed: HTTP ${e.statusCode}');
     } catch (e) {
-      // Never reached the api cleanly — network/CORS/DNS, or a route that
-      // returns no CORS headers (looks like a thrown error on web, not a 404).
       if (!mounted) return;
       setState(() {
         _command = null;
@@ -134,11 +152,13 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   /// Upload the committed photo to the endpoint this command's type maps to,
-  /// report completion, then pull the next queued command.
+  /// then ack the command (done) so the server stops redelivering it, then
+  /// pull the next queued command.
   Future<void> _usePhoto() async {
     final cmd = _command;
     final photo = _pendingPhoto;
-    if (cmd == null || photo == null) return;
+    final deviceId = _deviceId;
+    if (cmd == null || photo == null || deviceId == null) return;
     final auth = context.read<AuthService>();
     setState(() => _saving = true);
     final jwt = await auth.getAccessToken();
@@ -149,13 +169,16 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
     try {
+      Object? result;
       switch (cmd.type) {
         case _typeCaptureMeal:
           final mealId = cmd.mealId;
           if (mealId == null) {
             throw const FormatException('captureMeal without a mealId');
           }
-          await _foods.uploadProductImage(mealId, jwt, photo, source: 'meal');
+          final url =
+              await _foods.uploadProductImage(mealId, jwt, photo, source: 'meal');
+          if (url != null) result = {'cdnUrl': url};
           break;
         case _typeCaptureAvatar:
           await _avatars.uploadAvatar(photo, 'avatar.jpg', jwt);
@@ -163,17 +186,18 @@ class _CameraScreenState extends State<CameraScreen> {
         default:
           throw FormatException('unsupported command type ${cmd.type}');
       }
-      // Tell the api the capture landed so it clears the pending entry and
-      // emits the response event. Best-effort — a hiccup here just means the
-      // command may resurface on the next pull.
-      try {
-        await _commands.complete(cmd.commandId, jwt);
-      } catch (_) {/* non-fatal */}
+      // Upload landed → ack done. Mark handled so a redelivery before the
+      // server cursor advances doesn't re-shoot it.
+      _handled.add(cmd.messageId);
+      await _tether.ack(deviceId, cmd.messageId, 'done', jwt, result: result);
       if (!mounted) return;
       setState(() => _saving = false);
       _toast('Photo uploaded.');
       await _loadNext();
     } catch (e) {
+      // Upload or ack failed — do NOT mark handled; the command redelivers on
+      // the next poll so the user can retry.
+      _handled.remove(cmd.messageId);
       if (!mounted) return;
       setState(() => _saving = false);
       _toast('Upload failed — check your connection and try again.');
@@ -214,7 +238,7 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// No command queued — the user opened the panel with nothing to shoot.
+  /// No command queued — the user opened the screen with nothing to shoot.
   Widget _emptyState() {
     return Center(
       child: Padding(
@@ -253,18 +277,13 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Widget _commandBody(MobileCommand cmd) {
-    // Title/Description come resolved from the server so the phone can say what
-    // it's capturing without knowing the domain: "Meal Photo: Turkey & Lettuce…".
-    final heading = cmd.description.isEmpty
-        ? cmd.title
-        : '${cmd.title}: ${cmd.description}';
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            heading,
+            _headingFor(cmd),
             style: const TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -276,6 +295,19 @@ class _CameraScreenState extends State<CameraScreen> {
         ],
       ),
     );
+  }
+
+  /// What we're capturing. The poll command carries only type + mealId (no
+  /// name), so the heading is type-based; a meal shows its id for reference.
+  String _headingFor(MobileCommand cmd) {
+    switch (cmd.type) {
+      case _typeCaptureMeal:
+        return cmd.mealId != null ? 'Meal Photo (#${cmd.mealId})' : 'Meal Photo';
+      case _typeCaptureAvatar:
+        return 'Profile Photo';
+      default:
+        return 'Capture: ${cmd.type}';
+    }
   }
 
   Widget _pictureBox() {
