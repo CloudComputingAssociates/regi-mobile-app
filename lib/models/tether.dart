@@ -56,23 +56,60 @@ class TetherPollRequest {
   Map<String, dynamic> toJson() => {'deviceId': deviceId};
 }
 
+/// The generic capture target on a device command: WHAT to photograph. Sent
+/// as the command's `capture` object. [kind] routes the upload
+/// ('meal' | 'food' | 'avatar' | 'mealset' | …); [id] is the entity id (null
+/// for avatar, which is keyed off the JWT user); [name] is shown on the capture
+/// screen so the user knows what they're shooting.
+class CaptureTarget {
+  const CaptureTarget({required this.kind, this.id, this.name = ''});
+
+  final String kind;
+  final int? id;
+  final String name;
+
+  static CaptureTarget? fromJson(Map<String, dynamic> json) {
+    final kind = json['kind'];
+    if (kind is! String || kind.isEmpty) return null;
+    final rawId = json['id'];
+    return CaptureTarget(
+      kind: kind,
+      id: rawId is num ? rawId.toInt() : null,
+      name: json['name'] is String ? json['name'] as String : '',
+    );
+  }
+}
+
 /// A device command delivered on the poll heartbeat. Delivery is
 /// AT-LEAST-ONCE: the server REDELIVERS a command on every poll until the
 /// device acks it (POST /tether/ack) or it TTL-expires (~300s). Clients MUST
 /// de-dupe on [messageId] — the same command reappears each poll until acked,
-/// which is normal, not an error. [type] is the discriminator
-/// ('captureMeal' | 'captureAvatar' | …); [mealId] targets a meal for
-/// captureMeal and is null otherwise.
+/// which is normal, not an error.
+///
+/// [type] is the legacy discriminator ('captureMeal' | 'captureFood' | …).
+/// Prefer [capture] (the generic {kind,id,name} target); [mealId] is legacy,
+/// still set when the target is a meal. Resolve WHAT to shoot via [target].
 class MobileCommand {
   const MobileCommand({
     required this.messageId,
     required this.type,
     this.mealId,
+    this.capture,
   });
 
   final String messageId;
   final String type;
   final int? mealId;
+  final CaptureTarget? capture;
+
+  /// The resolved capture target: the generic [capture] if present, else the
+  /// legacy `{kind:'meal', id: mealId}`. Null when neither is usable (a
+  /// malformed command with no target) — callers should skip those.
+  CaptureTarget? get target {
+    if (capture != null) return capture;
+    if (mealId != null) return CaptureTarget(kind: 'meal', id: mealId);
+    return null;
+  }
 
   /// Returns null unless messageId + type are present, non-empty strings — a
   /// malformed entry is dropped rather than crashing the poll parse.
@@ -82,10 +119,14 @@ class MobileCommand {
     if (messageId is! String || messageId.isEmpty) return null;
     if (type is! String || type.isEmpty) return null;
     final rawMealId = json['mealId'];
+    final rawCapture = json['capture'];
     return MobileCommand(
       messageId: messageId,
       type: type,
       mealId: rawMealId is num ? rawMealId.toInt() : null,
+      capture: rawCapture is Map<String, dynamic>
+          ? CaptureTarget.fromJson(rawCapture)
+          : null,
     );
   }
 }

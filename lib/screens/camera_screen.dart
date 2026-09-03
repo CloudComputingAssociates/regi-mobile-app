@@ -38,8 +38,12 @@ class _CameraScreenState extends State<CameraScreen> {
   static const Color _bg = Color(0xFF1B1B1B);
   static const Color _scanRed = Color(0xFFFF3B30);
 
-  static const String _typeCaptureMeal = 'captureMeal';
-  static const String _typeCaptureAvatar = 'captureAvatar';
+  // Capture kinds (from the command's `capture.kind`). All but avatar upload to
+  // the product image endpoint; only source/target id differ. See _usePhoto.
+  static const String _kindMeal = 'meal';
+  static const String _kindFood = 'food';
+  static const String _kindMealset = 'mealset';
+  static const String _kindAvatar = 'avatar';
 
   final TetherService _tether = TetherService();
   final TetherIdentity _identity = TetherIdentity();
@@ -101,10 +105,10 @@ class _CameraScreenState extends State<CameraScreen> {
     _deviceId = deviceId;
     try {
       final res = await _tether.poll(deviceId, jwt);
-      // First command we haven't already fulfilled this session.
+      // First un-handled command that has a resolvable capture target.
       MobileCommand? next;
       for (final c in res.commands) {
-        if (!_handled.contains(c.messageId)) {
+        if (!_handled.contains(c.messageId) && c.target != null) {
           next = c;
           break;
         }
@@ -155,14 +159,17 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  /// Upload the committed photo to the endpoint this command's type maps to,
-  /// then ack the command (done) so the server stops redelivering it, then
-  /// pull the next queued command.
+  /// Upload the committed photo to the endpoint this command's KIND maps to,
+  /// then ack (done) with kind+id so the server advances its cursor and the web
+  /// can route its refresh, then pull the next queued command.
   Future<void> _usePhoto() async {
     final cmd = _command;
+    final target = cmd?.target;
     final photo = _pendingPhoto;
     final deviceId = _deviceId;
-    if (cmd == null || photo == null || deviceId == null) return;
+    if (cmd == null || target == null || photo == null || deviceId == null) {
+      return;
+    }
     final auth = context.read<AuthService>();
     setState(() => _saving = true);
     final jwt = await auth.getAccessToken();
@@ -172,27 +179,34 @@ class _CameraScreenState extends State<CameraScreen> {
       _toast('Not authenticated.');
       return;
     }
-    // STEP 1 — upload the photo to the type's image endpoint.
-    Object? result;
+    // STEP 1 — upload by kind. meal/food/mealset all POST to the product image
+    // endpoint (only source + target id differ); avatar goes to its own
+    // endpoint, keyed off the JWT user (id is null).
+    final isProductUpload = target.kind != _kindAvatar;
     String? cdnUrl;
     try {
-      switch (cmd.type) {
-        case _typeCaptureMeal:
-          final mealId = cmd.mealId;
-          if (mealId == null) {
-            throw const FormatException('captureMeal without a mealId');
-          }
-          cdnUrl = await _foods.uploadProductImage(mealId, jwt, photo,
+      switch (target.kind) {
+        case _kindMeal:
+          cdnUrl = await _foods.uploadProductImage(
+              _requireId(target), jwt, photo,
               source: 'meal');
-          if (cdnUrl != null) result = {'cdnUrl': cdnUrl};
           break;
-        case _typeCaptureAvatar:
+        case _kindFood:
+        case _kindMealset:
+          // mealset attaches to the same product row as food (source=user);
+          // confirm the entity id with the API team if this ever diverges.
+          cdnUrl = await _foods.uploadProductImage(
+              _requireId(target), jwt, photo,
+              source: 'user');
+          break;
+        case _kindAvatar:
           await _avatars.uploadAvatar(photo, 'avatar.jpg', jwt);
           break;
         default:
-          throw FormatException('unsupported command type ${cmd.type}');
+          throw FormatException('unsupported capture kind ${target.kind}');
       }
-      debugPrint('CAMERA upload OK type=${cmd.type} cdnUrl=$cdnUrl');
+      debugPrint('CAMERA upload OK kind=${target.kind} id=${target.id} '
+          'cdnUrl=$cdnUrl');
     } on UserFoodException catch (e) {
       _uploadFailed('Upload rejected: HTTP ${e.statusCode} ${_trim(e.body)}');
       return;
@@ -204,13 +218,20 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
 
-    // A meal upload that returns 200 but NO cdn_url means the API didn't store
-    // to GCS — surface that instead of a false "done".
-    if (cmd.type == _typeCaptureMeal && cdnUrl == null) {
+    // A product upload that returns 200 but NO cdn_url means the API didn't
+    // store to GCS — surface that instead of a false "done".
+    if (isProductUpload && cdnUrl == null) {
       _uploadFailed('API accepted the upload but returned no image URL — '
           'nothing was stored to GCS.');
       return;
     }
+
+    // Result echoed to the web so it can route its refresh: kind + id (+ url).
+    final result = <String, dynamic>{
+      'kind': target.kind,
+      if (target.id != null) 'id': target.id,
+      if (cdnUrl != null) 'cdnUrl': cdnUrl,
+    };
 
     // STEP 2 — ack so the server advances its cursor and echoes the result to
     // the web. Mark handled first so a redelivery mid-ack doesn't re-shoot.
@@ -328,13 +349,14 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Widget _commandBody(MobileCommand cmd) {
+    final target = cmd.target!; // selection guarantees a non-null target
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            _headingFor(cmd),
+            _headingFor(target),
             style: const TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -350,17 +372,30 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 
-  /// What we're capturing. The poll command carries only type + mealId (no
-  /// name), so the heading is type-based; a meal shows its id for reference.
-  String _headingFor(MobileCommand cmd) {
-    switch (cmd.type) {
-      case _typeCaptureMeal:
-        return cmd.mealId != null ? 'Meal Photo (#${cmd.mealId})' : 'Meal Photo';
-      case _typeCaptureAvatar:
-        return 'Profile Photo';
-      default:
-        return 'Capture: ${cmd.type}';
+  /// What we're capturing. Prefer the target's name ("Take a photo — {name}")
+  /// so the user knows the subject; fall back to a kind label (+ id) for a
+  /// legacy/nameless target. Avatar always reads "Profile photo".
+  String _headingFor(CaptureTarget t) {
+    if (t.kind == _kindAvatar) return 'Profile photo';
+    if (t.name.isNotEmpty) return 'Take a photo — ${t.name}';
+    final label = switch (t.kind) {
+      _kindMeal => 'Meal Photo',
+      _kindFood => 'Food Photo',
+      _kindMealset => 'MealSet Photo',
+      _ => 'Capture (${t.kind})',
+    };
+    return t.id != null ? '$label (#${t.id})' : label;
+  }
+
+  /// The entity id required for a product upload (meal/food/mealset). Throws a
+  /// FormatException — caught by [_usePhoto] — if the command arrived without
+  /// one, rather than uploading to a null id.
+  int _requireId(CaptureTarget t) {
+    final id = t.id;
+    if (id == null) {
+      throw FormatException('${t.kind} capture without an id');
     }
+    return id;
   }
 
   /// Just the image (or placeholder) with an "Uploading…" overlay while the
