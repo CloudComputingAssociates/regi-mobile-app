@@ -13,18 +13,28 @@ import '../services/user_food_service.dart';
 import '../widgets/close_disk_button.dart';
 
 /// The phone's capture surface — the "Camera" screen reached from the left-nav
-/// drawer. It fulfills a device command the web app queued for this phone.
+/// drawer. It fulfills a capture command queued for the LOGGED-IN USER.
+///
+/// IDENTITY: delivery is user-keyed, not device-keyed. The command is addressed
+/// to the account (the JWT user), so ANY of that login's live phones — iPhone,
+/// Android, whichever the user is holding — can pick it up. The per-install
+/// deviceId still exists, but only for registration/presence and for stamping
+/// which device fulfilled a command (traceability); it does NOT gate delivery.
 ///
 /// TRANSPORT: commands ride the tether poll heartbeat (POST /api/tether/poll),
 /// at-least-once — the server redelivers a command every poll until we ack it
-/// (POST /api/tether/ack) or it TTL-expires. The app-root presence loop ignores
-/// commands; THIS screen is what polls, shows what's queued, captures, uploads
-/// to the API by id, then acks. Redelivery-until-ack is why nothing pops the
-/// camera unbidden: the request just waits here until the user fulfills it.
+/// (POST /api/tether/ack) or it TTL-expires. A poll only PEEKS; the cursor
+/// advances on ack. The app-root presence loop ignores commands; THIS screen is
+/// what polls, shows what's queued, captures, uploads to the API by id, then
+/// acks. Redelivery-until-ack is why nothing pops the camera unbidden. First
+/// device to ack wins; a second, late ack is an idempotent no-op. (See the
+/// race-condition note in _usePhoto for the two-phones-one-account window.)
 ///
-/// Command types handled:
-///   • captureMeal   → mealId → POST /image/upload/product (source=meal)
-///   • captureAvatar → POST /image/upload/avatar
+/// Capture kinds handled (routed by capture.kind):
+///   • meal    → POST /image/upload/product (source=meal, foodId=id)
+///   • food    → POST /image/upload/product (source=user, foodId=id)
+///   • mealset → POST /image/upload/product (source=user, foodId=id)
+///   • avatar  → POST /image/upload/avatar  (id null; keyed off the JWT user)
 ///
 /// No pending command → empty state; there's simply nothing to capture.
 class CameraScreen extends StatefulWidget {
@@ -179,6 +189,15 @@ class _CameraScreenState extends State<CameraScreen> {
       _toast('Not authenticated.');
       return;
     }
+    // POSSIBLE RACE CONDITION — two phones, same account, could happen here.
+    // Command delivery is user-keyed (any of the login's live devices reads the
+    // same cursor), and a poll only PEEKS — the cursor advances on ack, not on
+    // read. So if both phones sit on this panel and both shoot before either
+    // acks, both upload for the same target: last-writer-wins on the stored
+    // image, and the first ack emits the sole receipt (the second ack is an
+    // idempotent server-side no-op). Accepted by design — a user holds one
+    // phone; we deliberately do not lock or cross-device dedupe.
+    //
     // STEP 1 — upload by kind. meal/food/mealset all POST to the product image
     // endpoint (only source + target id differ); avatar goes to its own
     // endpoint, keyed off the JWT user (id is null).
@@ -233,31 +252,51 @@ class _CameraScreenState extends State<CameraScreen> {
       if (cdnUrl != null) 'cdnUrl': cdnUrl,
     };
 
-    // STEP 2 — ack so the server advances its cursor and echoes the result to
-    // the web. Mark handled first so a redelivery mid-ack doesn't re-shoot.
+    // STEP 2 — ack so the server advances its cursor and emits the traceability
+    // receipt (result → command by messageId, with the image URI). Mark handled
+    // first so a redelivery mid-ack doesn't re-shoot. The upload already landed,
+    // so we RETRY the ack: it's the only thing that closes the
+    // "uploaded-but-no-receipt" gap, and ack is idempotent server-side (a repeat
+    // is a safe no-op), so retrying can only help.
     _handled.add(cmd.messageId);
-    try {
-      await _tether.ack(deviceId, cmd.messageId, 'done', jwt, result: result);
-      debugPrint('CAMERA ack OK messageId=${cmd.messageId}');
-    } on TetherException catch (e) {
-      // Photo IS uploaded; only the ack failed. Don't unmark — re-acking is a
-      // safe no-op and we don't want to re-shoot. Tell the user plainly.
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _toast('Uploaded ✓ but ack failed: HTTP ${e.statusCode} — '
-          'web may not refresh. ${_trim(e.body)}');
-      return;
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      _toast('Uploaded ✓ but ack error: $e');
-      return;
-    }
-
+    final acked = await _ackWithRetry(deviceId, cmd.messageId, 'done', jwt, result);
     if (!mounted) return;
     setState(() => _saving = false);
+    if (!acked) {
+      _toast('Uploaded ✓ but the receipt (ack) didn’t go through — '
+          'the web may not refresh.');
+      return;
+    }
     _toast(cdnUrl != null ? 'Uploaded ✓ → $cdnUrl' : 'Uploaded ✓');
     await _loadNext();
+  }
+
+  /// Ack with a small bounded retry. The upload has already succeeded by the
+  /// time we call this, so the goal is durability of the RECEIPT, not of the
+  /// photo. Ack is idempotent (a messageId already behind the cursor is a 200
+  /// no-op), so repeats are safe. Returns true on the first success, false if
+  /// every attempt failed.
+  Future<bool> _ackWithRetry(
+    int deviceId,
+    String messageId,
+    String status,
+    String jwt,
+    Object? result,
+  ) async {
+    const attempts = 3;
+    for (var i = 0; i < attempts; i++) {
+      try {
+        await _tether.ack(deviceId, messageId, status, jwt, result: result);
+        debugPrint('CAMERA ack OK messageId=$messageId (attempt ${i + 1})');
+        return true;
+      } catch (e) {
+        debugPrint('CAMERA ack attempt ${i + 1}/$attempts failed — $e');
+        if (i < attempts - 1) {
+          await Future.delayed(Duration(milliseconds: 400 * (i + 1)));
+        }
+      }
+    }
+    return false;
   }
 
   /// Common failure path for a failed upload: don't mark handled (so the
