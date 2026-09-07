@@ -48,6 +48,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   static const Color _bg = Color(0xFF1B1B1B);
   static const Color _inputFill = Color(0xFF555555);
   static const Color _scanRed = Color(0xFFFF3B30);
+  // Positive/commit accent. No green exists in the app palette (theme seed is
+  // maroon), so it's defined here — iOS system green, sibling to the iOS-red
+  // _scanRed, with adequate contrast on _bg.
+  static const Color _saveGreen = Color(0xFF34C759);
 
   final UserFoodService _service = UserFoodService();
   final UpcScannerController _scanner = UpcScannerController();
@@ -83,10 +87,19 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   // True while we're polling the food row for the async-fetched product image
   // (imageStatus == "fetching"). Drives the "Getting image…" spinner.
   bool _fetchingImage = false;
-  // A freshly-taken photo the user hasn't committed yet. While non-null the
-  // picture box shows it as a preview with Retake / Use photo, and it's held
-  // in memory until Save uploads it. Cleared on rescan or after a save.
-  Uint8List? _pendingPhoto;
+  // A taken photo the user hasn't committed yet. Two sub-states:
+  //   • candidate — just shot, showing Retake / Keep; not yet accepted.
+  //   • staged    — accepted via Keep ([_photoKept] true); the green AppBar
+  //                 Save commits it. Held in memory until Save uploads it.
+  // Cleared on rescan or after a save.
+  Uint8List? _photo;
+  // Candidate promoted to staged by the user's Keep tap. Drives the green Save
+  // and the staged picture-box buttons.
+  bool _photoKept = false;
+  // Latched true the moment a photo is Kept and left set through the save, so
+  // the async org-image poll can never repaint over the user's chosen photo.
+  // Reset only on rescan.
+  bool _userPhotoWins = false;
   // The category the last scan persisted server-side. The dropdown can drift
   // from this after the scan; the gap is what Save's category PATCH commits.
   int? _savedCategoryId;
@@ -97,6 +110,16 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   /// it — so it needs its own Save affordance (the AppBar check).
   bool get _categoryDirty =>
       _result != null && _savedCategoryId != null && _categoryId != _savedCategoryId;
+
+  /// A kept photo or a category change — the commit surface (green AppBar Save)
+  /// keys off this. A bare candidate (taken, not yet Kept) is deliberately
+  /// excluded: its commit path is Keep, not Save.
+  bool get _hasStagedChanges => _photoKept || _categoryDirty;
+
+  /// Anything the user would lose on close/rescan — staged changes PLUS a bare
+  /// candidate photo. The abandon guard keys off this so a shot the user took
+  /// but hasn't Kept doesn't evaporate silently.
+  bool get _hasUnsavedWork => _hasStagedChanges || _photo != null;
 
   @override
   void dispose() {
@@ -197,9 +220,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     try {
       for (var attempt = 0; attempt < 6; attempt++) {
         await Future.delayed(const Duration(seconds: 2));
-        if (!mounted || _result != food) return;
+        if (!mounted || _result != food || _userPhotoWins) return;
         final url = await _service.fetchFoodImageUrl(id, jwt);
-        if (!mounted || _result != food) return;
+        if (!mounted || _result != food || _userPhotoWins) return;
         if (url != null) {
           setState(() => food.raw['foodImage'] = url);
           return;
@@ -218,10 +241,17 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   /// unlock + clear the Name so they can enter a fresh one.
   Future<void> _onScanPressed() async {
     if (_result != null) {
+      // Rescanning abandons the current result — route through the same
+      // discard/save prompt as the close disc so staged work (or a bare
+      // candidate photo) isn't dropped silently.
+      if (!await _confirmDiscard()) return;
+      if (!mounted) return;
       setState(() {
         _result = null;
         _fetchingImage = false;
-        _pendingPhoto = null;
+        _photo = null;
+        _photoKept = false;
+        _userPhotoWins = false;
         _name.clear();
       });
     }
@@ -252,17 +282,18 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
         automaticallyImplyLeading: false,
         title: const Text('Food UPC scan'),
         actions: [
-          // Save appears only for a category-only edit (a pending photo carries
-          // its own "Use photo" commit, so we don't double up). It never renders
-          // in a ghost-disabled state — it's here or it isn't.
-          if (_categoryDirty && _pendingPhoto == null && !_saving)
+          // The single commit point: one green check that stages-through to the
+          // upload/PATCH. Present iff a kept photo or a category change is
+          // staged; never rendered in a ghost-disabled state — it's here or it
+          // isn't. A bare candidate is committed via the in-box Keep, not here.
+          if (_hasStagedChanges && !_saving)
             IconButton(
               tooltip: 'Save',
-              icon: const Icon(Icons.check, color: _scanRed),
-              onPressed: _save,
+              icon: const Icon(Icons.check, color: _saveGreen),
+              onPressed: _commit,
             ),
-          // Close (rightmost = the corner).
-          CloseDiskButton(onClose: () => Navigator.of(context).maybePop()),
+          // Close (rightmost = the corner) — guarded so unsaved work prompts.
+          CloseDiskButton(onClose: _onClose),
         ],
       ),
       body: SingleChildScrollView(
@@ -393,7 +424,7 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
   ///   • the resolved product image (or placeholder) → + Take pic.
   /// A saving overlay covers the box while the upload/PATCH is in flight.
   Widget _pictureBox() {
-    final pending = _pendingPhoto;
+    final photo = _photo;
     final url = _result?.imageUrl;
     return AspectRatio(
       aspectRatio: 1,
@@ -403,8 +434,8 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
           fit: StackFit.expand,
           children: [
             // Image layer.
-            if (pending != null)
-              Image.memory(pending, fit: BoxFit.cover)
+            if (photo != null)
+              Image.memory(photo, fit: BoxFit.cover)
             else if (url != null)
               Image.network(
                 url,
@@ -432,8 +463,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
               _noImagePlaceholder(),
 
             // Button layer.
-            if (pending != null)
-              _pendingPhotoActions()
+            if (photo != null && !_photoKept)
+              _candidateActions()
+            else if (photo != null)
+              _stagedActions()
             else
               Positioned(
                 right: 10,
@@ -458,11 +491,10 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     );
   }
 
-  /// Retake / Use photo pair shown over a freshly-taken, uncommitted photo.
-  /// "Use photo" is the approval — it runs the full [_save] (upload the photo,
-  /// which deletes the old one + rebuilds the thumbnail server-side, plus any
-  /// pending category change). "Retake" re-opens the camera.
-  Widget _pendingPhotoActions() {
+  /// Retake / Keep pair shown over a freshly-taken CANDIDATE photo. "Keep" is
+  /// the accept — it STAGES the shot (no upload); the single green AppBar Save
+  /// commits it later. "Retake" re-opens the camera for another candidate.
+  Widget _candidateActions() {
     return Positioned(
       left: 10,
       right: 10,
@@ -477,11 +509,26 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             filled: false,
           ),
           _pictureButton(
-            onPressed: _saving ? null : _save,
+            onPressed: _saving ? null : _keep,
             icon: Icons.check,
-            label: 'Use photo',
+            label: 'Keep',
           ),
         ],
+      ),
+    );
+  }
+
+  /// Retake shown over a STAGED photo (already Kept). The commit lives in the
+  /// green AppBar Save now, so the only in-box affordance is swapping the shot.
+  Widget _stagedActions() {
+    return Positioned(
+      right: 10,
+      bottom: 10,
+      child: _pictureButton(
+        onPressed: _saving ? null : _takePic,
+        icon: Icons.refresh,
+        label: 'Retake',
+        filled: false,
       ),
     );
   }
@@ -562,29 +609,45 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       if (shot == null) return; // user cancelled
       final bytes = await shot.readAsBytes();
       if (!mounted) return;
-      setState(() => _pendingPhoto = bytes);
+      // A fresh candidate — not yet accepted. Keep promotes it to staged.
+      setState(() {
+        _photo = bytes;
+        _photoKept = false;
+      });
     } catch (e) {
       _toast('Camera unavailable: $e');
     }
   }
 
-  /// Commits the user's post-scan edits in one shot and reports back with a
-  /// single "Food image and info updated" toast. Uploads a pending photo (the
-  /// API deletes the prior image + rebuilds the thumbnail synchronously) and
-  /// PATCHes the category if it drifted from what the scan saved. Name is
-  /// intentionally not editable post-scan, so it never participates here.
-  Future<void> _save() async {
+  /// The user's explicit accept of the candidate shot. Stages only — NO upload
+  /// (the green AppBar Save commits it). Latches [_userPhotoWins] so the async
+  /// org-image poll can never repaint over the photo the user chose.
+  void _keep() {
+    setState(() {
+      _photoKept = true;
+      _userPhotoWins = true;
+    });
+  }
+
+  /// Commits the user's staged post-scan edits in one shot and reports back
+  /// with a single "Food image and info updated" toast. Uploads the staged
+  /// photo (the API deletes the prior image + rebuilds the thumbnail
+  /// synchronously) and PATCHes the category if it drifted from what the scan
+  /// saved. Name is intentionally not editable post-scan, so it never
+  /// participates here. Returns true on a clean commit, false on any failure —
+  /// callers (the abandon dialog) use this to decide whether it's safe to pop.
+  Future<bool> _commit() async {
     final food = _result;
-    if (food == null || food.id == null) return;
+    if (food == null || food.id == null) return false;
     final auth = context.read<AuthService>();
     setState(() => _saving = true);
 
     final jwt = await auth.getAccessToken();
     if (jwt == null) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _saving = false);
       _toast('Not authenticated.');
-      return;
+      return false;
     }
 
     try {
@@ -594,27 +657,92 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
       if (_categoryId != _savedCategoryId) {
         await _service.updateCategory(food.id!, jwt, _categoryId);
       }
-      final photo = _pendingPhoto;
+      final photo = _photo;
       if (photo != null) {
         final url = await _service.uploadProductImage(food.id!, jwt, photo);
         if (url != null) food.raw['foodImage'] = url;
       }
-      if (!mounted) return;
+      if (!mounted) return true;
       setState(() {
         _savedCategoryId = _categoryId;
-        _pendingPhoto = null;
+        // Staged state is now committed; clear it. _userPhotoWins stays latched
+        // so a late org-image poll can't revert the photo we just saved.
+        _photo = null;
+        _photoKept = false;
         _saving = false;
       });
       _toast('Food image and info updated.');
+      return true;
     } on UserFoodException catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _saving = false);
       _toast('Save failed (HTTP ${e.statusCode}).');
+      return false;
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted) return false;
       setState(() => _saving = false);
       _toast('Save failed — check your connection and try again.');
+      return false;
     }
+  }
+
+  /// Guarded close for the red disc. On a clean screen it just pops; with
+  /// unsaved work it routes through the discard/save prompt.
+  Future<void> _onClose() async {
+    if (!await _confirmDiscard()) return;
+    if (!mounted) return;
+    await Navigator.of(context).maybePop();
+  }
+
+  /// Prompt shown when leaving/rescanning with unsaved work. Returns true if the
+  /// caller may proceed (nothing to lose, the user discarded, or a Save that
+  /// committed cleanly); false to stay put (cancelled, or the Save's commit
+  /// failed — we never pop into the void with unsaved work after a failed
+  /// upload). A bare candidate counts as unsaved work here, and picking Save on
+  /// one is treated as Keep + commit so the shot the user meant to keep uploads.
+  Future<bool> _confirmDiscard() async {
+    if (!_hasUnsavedWork) return true;
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF2A2A2A),
+        title: const Text('Unsaved changes',
+            style: TextStyle(color: Colors.white)),
+        content: const Text(
+          'You have a photo or category change that hasn’t been saved.',
+          style: TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('cancel'),
+            child:
+                const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('discard'),
+            child: const Text('Discard', style: TextStyle(color: _scanRed)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop('save'),
+            child: const Text('Save', style: TextStyle(color: _saveGreen)),
+          ),
+        ],
+      ),
+    );
+    if (choice == 'discard') return true;
+    if (choice == 'save') {
+      if (!mounted) return false;
+      // A candidate (taken but not Kept) is accepted here: treat Save as
+      // Keep + commit so it participates in the upload.
+      if (_photo != null && !_photoKept) {
+        setState(() {
+          _photoKept = true;
+          _userPhotoWins = true;
+        });
+      }
+      return _commit();
+    }
+    return false; // cancel or dismissed — stay put
   }
 
   /// A numbered step row: badge + label (+ "(optional)") on the left, and
