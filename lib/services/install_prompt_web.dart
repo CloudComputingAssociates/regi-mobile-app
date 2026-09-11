@@ -15,8 +15,9 @@ enum InstallMode {
   /// Nothing to show — installed, unsupported, or not applicable.
   none,
 
-  /// Chromium captured a beforeinstallprompt — show a one-tap Install button.
-  androidPrompt,
+  /// Android browser — show an Install button (direct prompt if the browser
+  /// offered one, otherwise inline Chrome-menu instructions).
+  android,
 
   /// iOS Safari — show manual Share → Add to Home Screen instructions.
   iosInstructions,
@@ -28,6 +29,11 @@ class InstallPromptService extends ChangeNotifier {
   /// after prompt() or when the app reports itself installed.
   JSObject? _deferred;
   bool _installed = false;
+
+  /// Whether a stashed beforeinstallprompt is available to fire directly. The UI
+  /// reads this to pick the Install button's behavior; it re-reads on notify, so
+  /// a late-arriving event upgrades the fallback path to a direct prompt().
+  bool get hasPrompt => _deferred != null;
 
   InstallPromptService() {
     // beforeinstallprompt: suppress the mini-infobar and stash the event so the
@@ -62,6 +68,13 @@ class InstallPromptService extends ChangeNotifier {
     return raw.dartify() == true;
   }
 
+  /// Android browser. Visibility no longer depends on beforeinstallprompt —
+  /// Chrome suppresses that event after a prior dismissal, so gating on it hid
+  /// the nudge on exactly the devices that most need it. The Install button
+  /// itself decides direct-prompt vs. manual instructions via [hasPrompt].
+  bool get _isAndroid =>
+      web.window.navigator.userAgent.toLowerCase().contains('android');
+
   /// iOS Safari (the only iOS engine that offers Add to Home Screen). iPadOS 13+
   /// masquerades as desktop Mac, so treat a touch-capable Mac as iOS too.
   /// Excludes Chrome/Firefox for iOS (CriOS/FxiOS) — their share sheet differs.
@@ -81,7 +94,7 @@ class InstallPromptService extends ChangeNotifier {
 
   InstallMode get mode {
     if (_installed || _isStandalone) return InstallMode.none;
-    if (_deferred != null) return InstallMode.androidPrompt;
+    if (_isAndroid) return InstallMode.android;
     if (_isIosSafari) return InstallMode.iosInstructions;
     return InstallMode.none;
   }

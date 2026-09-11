@@ -8,8 +8,9 @@ enum InstallMode {
   /// Nothing to show — installed, unsupported, or not applicable.
   none,
 
-  /// Chromium captured a beforeinstallprompt — show a one-tap Install button.
-  androidPrompt,
+  /// Android browser — show an Install button (direct prompt if the browser
+  /// offered one, otherwise inline Chrome-menu instructions).
+  android,
 
   /// iOS Safari — show manual Share → Add to Home Screen instructions.
   iosInstructions,
@@ -17,6 +18,8 @@ enum InstallMode {
 
 class InstallPromptService extends ChangeNotifier {
   InstallMode get mode => InstallMode.none;
+
+  bool get hasPrompt => false;
 
   Future<void> promptInstall() async {}
 }
