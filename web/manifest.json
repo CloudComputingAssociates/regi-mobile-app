@@ -1,7 +1,9 @@
 {
     "name": "RegiMenu",
     "short_name": "RegiMenu",
-    "start_url": ".",
+    "id": "/",
+    "start_url": "/",
+    "scope": "/",
     "display": "standalone",
     "background_color": "#0B1220",
     "theme_color": "#0B1220",
