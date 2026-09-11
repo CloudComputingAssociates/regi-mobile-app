@@ -7,6 +7,7 @@ import 'screens/login_screen.dart';
 import 'services/auth_service.dart';
 import 'state/chat_state.dart';
 import 'tether_lifecycle.dart';
+import 'widgets/install_prompt_overlay.dart';
 import 'widgets/mode_slider.dart';
 
 class RegiChatApp extends StatefulWidget {
@@ -67,6 +68,15 @@ class _RegiChatAppState extends State<RegiChatApp> {
             brightness: Brightness.dark,
           ),
           useMaterial3: true,
+        ),
+        // Floats the PWA install nudge above every route. Inert (and touch-
+        // transparent) unless the browser reports the site installable and the
+        // user hasn't dismissed it; never shown once installed/standalone.
+        builder: (context, child) => Stack(
+          children: [
+            if (child != null) child,
+            const InstallPromptOverlay(),
+          ],
         ),
         home: !_bootstrapped
             ? _Splash(error: _bootstrapError)
