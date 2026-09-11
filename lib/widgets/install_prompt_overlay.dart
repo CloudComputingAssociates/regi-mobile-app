@@ -32,6 +32,11 @@ class _InstallPromptOverlayState extends State<InstallPromptOverlay> {
   bool _dismissed = true;
   bool _loaded = false;
 
+  // Android only: the user tapped Install while no beforeinstallprompt was
+  // stashed, so we revealed the manual Chrome-menu fallback. Ignored the moment
+  // a real event is available (direct prompt takes over).
+  bool _androidFallbackShown = false;
+
   @override
   void initState() {
     super.initState();
@@ -109,8 +114,8 @@ class _InstallPromptOverlayState extends State<InstallPromptOverlay> {
                   style: TextStyle(color: Colors.white70, fontSize: 15),
                 ),
                 const SizedBox(height: 28),
-                if (mode == InstallMode.androidPrompt)
-                  _installButton()
+                if (mode == InstallMode.android)
+                  _androidSection()
                 else
                   _iosSteps(),
                 const SizedBox(height: 16),
@@ -153,9 +158,53 @@ class _InstallPromptOverlayState extends State<InstallPromptOverlay> {
     );
   }
 
-  Widget _installButton() {
+  Widget _androidSection() {
+    // A stashed event → Install fires it directly. Otherwise Install reveals the
+    // Chrome-menu fallback. If the event lands late, `hasPrompt` flips true on
+    // the next notify and we render the direct path regardless of prior tap.
+    final direct = _service.hasPrompt;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _installButton(
+          onPressed: direct
+              ? _service.promptInstall
+              : () => setState(() => _androidFallbackShown = true),
+        ),
+        if (!direct && _androidFallbackShown) ...[
+          const SizedBox(height: 16),
+          _androidFallback(),
+        ],
+      ],
+    );
+  }
+
+  Widget _androidFallback() {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: const [
+          Icon(Icons.more_vert, color: Colors.white70, size: 22),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              "Open Chrome's menu (⋮) and tap 'Install app'.",
+              style: TextStyle(color: Colors.white, fontSize: 15),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _installButton({required VoidCallback onPressed}) {
     return FilledButton(
-      onPressed: _service.promptInstall,
+      onPressed: onPressed,
       style: FilledButton.styleFrom(
         backgroundColor: _accent,
         foregroundColor: Colors.white,
