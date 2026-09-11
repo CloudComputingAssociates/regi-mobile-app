@@ -193,7 +193,7 @@ class _InstallPromptOverlayState extends State<InstallPromptOverlay> {
           SizedBox(width: 12),
           Expanded(
             child: Text(
-              "Open Chrome's menu (⋮) and tap 'Install app'.",
+              "Tap Chrome's ⋮ menu (top right), then tap 'Install and create shortcut'.",
               style: TextStyle(color: Colors.white, fontSize: 15),
             ),
           ),
