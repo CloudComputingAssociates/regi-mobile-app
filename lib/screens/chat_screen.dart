@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -8,21 +9,29 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
 import '../models/utterance_result.dart';
+import '../models/ptt_mode.dart';
+import '../services/audio_recorder.dart';
 import '../services/auth_service.dart';
 import '../services/chat_service.dart';
 import '../services/command_service.dart';
 import '../services/conversation_sink.dart';
 import '../services/mic_level_service.dart';
 import '../services/settings_service.dart';
-import '../services/speech_service.dart';
+import '../services/stt_service.dart';
 import '../services/tts_service.dart' show TtsService, TtsException;
 import '../state/chat_state.dart';
 import '../utils/units.dart';
 import '../widgets/chat_input.dart';
 import '../widgets/chat_output.dart';
 import '../widgets/mic_level_bars.dart';
+import '../services/glp1_service.dart';
+import '../utils/ptt_layout.dart';
 import '../widgets/blooms/user_settings.dart';
 import '../widgets/ptt_button.dart';
+import 'camera_screen.dart';
+import 'food_upc_scan_screen.dart';
+import 'journal_screen.dart';
+import 'settings_screen.dart';
 
 // Pinned for v1.0: "Regi" (pronounced "Reggie"), Male — backend's
 // "Michael (Male)" voice, GCP Neural2-J. Defined in regi-api at
@@ -43,7 +52,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final ChatService _chat = ChatService();
   final CommandService _command = CommandService();
   final SettingsService _settings = SettingsService();
-  final SpeechService _speech = SpeechService();
+  final AudioRecorderService _recorder = AudioRecorderService();
+  final SttService _stt = SttService();
   final TtsService _tts = TtsService();
   // RAG seam — today a no-op. Every user/assistant turn flows through
   // recordTurn so that when the background-queue + Weaviate pipeline
@@ -71,8 +81,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // start() is not called. Kept wired (import + dispose) so re-enabling
   // is a one-line change once the recognizer/analyser conflict is solved.
   final MicLevelService _micLevels = MicLevelService();
-  StreamSubscription<String>? _speechSub;
-  StreamSubscription<String>? _speechStatusSub;
   // In-flight guard. Defends against any path that double-invokes
   // _sendMessage (rapid double-tap, Flutter Web onSubmitted bugs, etc.).
   bool _sending = false;
@@ -82,13 +90,26 @@ class _ChatScreenState extends State<ChatScreen> {
   static const _skipClearPrefKey = 'clear_confirm_skip';
   bool _skipClearConfirm = false;
 
-  // PTT button relocation: parent owns position + persistence; the button
-  // only reports drag deltas upward.
-  static const _pttOffsetXKey = 'ptt_offset_x';
-  static const _pttOffsetYKey = 'ptt_offset_y';
-  static const _pttButtonSize = 90.0;
+  // In-memory guard: prevents the banner from re-firing during a
+  // single screen lifetime (rebuilds, post-frame retries, etc.).
+  bool _glp1BannerChecked = false;
+  // Persisted: the YYYY-MM-DD the user last tapped "OK" to dismiss
+  // the GLP-1 banner. While this equals today, the banner is
+  // suppressed even though the server still reports
+  // isInjectionDay=true — the user has seen it today and explicitly
+  // chose "leave me alone". Tomorrow the date no longer matches and
+  // the banner returns if still due (because they still haven't
+  // logged). Logging the injection flips isInjectionDay server-side
+  // and the banner stops via the upstream check, independent of
+  // this key. GO TO JOURNAL deliberately does NOT ack — if the user
+  // bounces back without saving, they still want the reminder.
+  static const _glp1AckPrefKey = 'glp1_banner_ack_date';
+
+  // PTT button relocation: parent owns position + persistence; the
+  // button only reports drag deltas upward. Layout constants + the
+  // shared SharedPreferences keys live in [PttLayout] so other screens
+  // (Journal, etc.) render their mic disc at the same coordinates.
   static const _pttDragInactivityTimeout = Duration(seconds: 5);
-  static const _pttDefaultBottomInset = 210.0;
 
   Offset? _pttPosition;
   bool _pttDragMode = false;
@@ -105,26 +126,106 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    _speech.initialize();
-    // Track recognizer's actual listening state so the AppBar mic icon
-    // lights amber only when the recognizer is genuinely capturing audio,
-    // not just when the user pressed the button. This is the "ready" cue
-    // for the beginning-word cut-off issue: users learn to wait for the
-    // amber glow before they start speaking. The platform recognizer emits
-    // 'listening' / 'notListening' / 'done'; map both terminal states to
-    // not-listening so the icon reverts promptly.
-    _speechStatusSub = _speech.statuses.listen((s) {
-      if (!mounted) return;
-      switch (s) {
-        case 'listening':
-          context.read<ChatState>().setListening(true);
-        case 'notListening':
-        case 'done':
-          context.read<ChatState>().setListening(false);
-      }
-    });
     _loadSkipClearPref();
     _loadPttPosition();
+    // Post-frame so ScaffoldMessenger is mounted before we try to
+    // show a MaterialBanner. Fires on every app entry while due —
+    // logging the injection flips the server's isInjectionDay to
+    // false so it stops on its own (no local "don't ask again").
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_maybeShowGlp1Banner());
+    });
+  }
+
+  /// Asks regi-api whether today is a GLP-1 injection day for the
+  /// signed-in user and, if so, shows a MaterialBanner with a
+  /// "GO TO JOURNAL" action that pushes [JournalScreen] (same push
+  /// the drawer's Enter Journal uses). Any failure — no JWT, network
+  /// drop, malformed response — degrades silently so chat is never
+  /// blocked by a GLP-1 outage. Single-fire per screen lifetime via
+  /// [_glp1BannerChecked].
+  Future<void> _maybeShowGlp1Banner() async {
+    if (_glp1BannerChecked || !mounted) return;
+    _glp1BannerChecked = true;
+    // Per-day ack: if the user already tapped OK today, stay quiet.
+    // The key only persists the ack date string, so a new local
+    // calendar day automatically re-enables the banner.
+    final prefs = await SharedPreferences.getInstance();
+    final todayStr = _localDateString(DateTime.now());
+    if (prefs.getString(_glp1AckPrefKey) == todayStr) return;
+    if (!mounted) return;
+    final jwt = await context.read<AuthService>().getAccessToken();
+    if (jwt == null || !mounted) return;
+    final svc = Glp1Service();
+    try {
+      final status = await svc.getStatus(jwt);
+      if (!mounted) return;
+      if (!status.enabled || !status.isInjectionDay) return;
+      final messenger = ScaffoldMessenger.of(context);
+      // Amber warning background — the same accent used elsewhere in
+      // the app (PTT press-glow) so the warning ties visually but
+      // stands out far more than the dark chrome. Foreground swaps
+      // to a near-black for contrast on yellow.
+      messenger.showMaterialBanner(
+        MaterialBanner(
+          backgroundColor: const Color(0xFFF2B33D),
+          contentTextStyle: const TextStyle(
+            color: Color(0xFF1B1B1B),
+            fontWeight: FontWeight.w600,
+          ),
+          content: const Text('GLP-1 injection due today.'),
+          actions: [
+            TextButton(
+              onPressed: () {
+                messenger.hideCurrentMaterialBanner();
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const JournalScreen()),
+                );
+              },
+              child: const Text(
+                'GO TO JOURNAL',
+                style: TextStyle(
+                  color: Color(0xFF1B1B1B),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+            TextButton(
+              // Ack for today — write the local date string so
+              // tomorrow's launch re-enables the banner if still
+              // due. Server flipping isInjectionDay (on a logged
+              // injection) is the other path that suppresses it
+              // permanently; OK is just "I see you, leave me alone
+              // for today".
+              onPressed: () async {
+                messenger.hideCurrentMaterialBanner();
+                final p = await SharedPreferences.getInstance();
+                await p.setString(_glp1AckPrefKey, todayStr);
+              },
+              child: const Text(
+                'OK',
+                style: TextStyle(color: Color(0xFF1B1B1B)),
+              ),
+            ),
+          ],
+        ),
+      );
+    } catch (_) {
+      // Silent — GLP-1 banner is a courtesy, not load-bearing.
+    } finally {
+      svc.dispose();
+    }
+  }
+
+  /// LOCAL calendar date as YYYY-MM-DD — same shape as
+  /// JournalService / Glp1Service helpers. Local so a user in PST
+  /// who taps OK at 11:30pm doesn't get the banner back at 12:01am
+  /// UTC-rollover.
+  String _localDateString(DateTime d) {
+    final y = d.year.toString().padLeft(4, '0');
+    final m = d.month.toString().padLeft(2, '0');
+    final day = d.day.toString().padLeft(2, '0');
+    return '$y-$m-$day';
   }
 
   Future<void> _loadSkipClearPref() async {
@@ -136,22 +237,16 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _loadPttPosition() async {
-    final prefs = await SharedPreferences.getInstance();
-    final x = prefs.getDouble(_pttOffsetXKey);
-    final y = prefs.getDouble(_pttOffsetYKey);
-    if (!mounted) return;
-    if (x != null && y != null) {
-      setState(() => _pttPosition = Offset(x, y));
-    }
+    final saved = await PttLayout.loadSavedPosition();
+    if (!mounted || saved == null) return;
+    setState(() => _pttPosition = saved);
   }
 
   @override
   void dispose() {
-    _speechSub?.cancel();
-    _speechStatusSub?.cancel();
     _pttDragTimer?.cancel();
-    _speech.stop();
-    _speech.dispose();
+    unawaited(_recorder.dispose());
+    _stt.dispose();
     _chat.dispose();
     _command.dispose();
     _settings.dispose();
@@ -160,21 +255,16 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  Offset _defaultPttPosition(Size screen) {
-    return Offset(
-      (screen.width - _pttButtonSize) / 2,
-      screen.height - _pttDefaultBottomInset - _pttButtonSize,
-    );
-  }
+  Offset _defaultPttPosition(Size screen) =>
+      PttLayout.defaultPosition(screen);
 
-  Offset _clampPttPosition(Offset pos, Size screen) {
-    final maxX = (screen.width - _pttButtonSize).clamp(0.0, double.infinity);
-    final maxY = (screen.height - _pttButtonSize).clamp(0.0, double.infinity);
-    return Offset(
-      pos.dx.clamp(0.0, maxX),
-      pos.dy.clamp(0.0, maxY),
-    );
-  }
+  /// Chat reserves the chat-input row so PTT can't cover the mute /
+  /// mode / talk controls.
+  Offset _clampPttPosition(Offset pos, Size screen) => PttLayout.clamp(
+        pos,
+        screen,
+        reservedBottom: PttLayout.chatInputApproxHeight,
+      );
 
   void _armPttDragTimer() {
     _pttDragTimer?.cancel();
@@ -197,11 +287,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _persistPttPosition(Offset pos) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble(_pttOffsetXKey, pos.dx);
-    await prefs.setDouble(_pttOffsetYKey, pos.dy);
-  }
+  Future<void> _persistPttPosition(Offset pos) => PttLayout.savePosition(pos);
 
   void _handlePttDragMove(Offset delta) {
     _armPttDragTimer();
@@ -425,9 +511,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   // Display + speak a Regi utterance. Mirrors the TTS code path in
-  // _doSendMessage (same _pinnedVoiceId + state.ttsRate, same fresh-JWT
-  // fetch, same TtsException handling) so command responses sound
-  // identical to chat replies. No-op on empty text.
+  // _doSendMessage (same _pinnedVoiceId, same fresh-JWT fetch, same
+  // TtsException handling) so command responses sound identical to chat
+  // replies. No-op on empty text.
   void _regiSay(String text) {
     final trimmed = text.trim();
     if (trimmed.isEmpty) return;
@@ -437,7 +523,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!state.ttsEnabled) return;
 
     final auth = context.read<AuthService>();
-    final rate = state.ttsRate;
     unawaited(() async {
       final jwt = await auth.getAccessToken();
       if (jwt == null) return;
@@ -446,7 +531,6 @@ class _ChatScreenState extends State<ChatScreen> {
           text,
           jwt: jwt,
           voice: _pinnedVoiceId,
-          speakingRate: rate,
         );
       } on TtsException catch (e) {
         if (!mounted) return;
@@ -516,7 +600,6 @@ class _ChatScreenState extends State<ChatScreen> {
     if (state.ttsEnabled && stream.content.trim().isNotEmpty) {
       final replyText = stream.content;
       const voiceId = _pinnedVoiceId;
-      final rate = state.ttsRate;
       unawaited(() async {
         final freshJwt = await auth.getAccessToken() ?? jwt;
         try {
@@ -524,7 +607,6 @@ class _ChatScreenState extends State<ChatScreen> {
             replyText,
             jwt: freshJwt,
             voice: voiceId,
-            speakingRate: rate,
           );
         } on TtsException catch (e) {
           if (!mounted) return;
@@ -630,44 +712,132 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // Voice capture is BATCH (record-then-transcribe), not streaming. On
+  // press we open the OS mic and buffer raw PCM via [AudioRecorderService];
+  // on release we ship the WAV blob to /api/speech/stt/transcribe and
+  // dispatch the returned transcript. There is intentionally no live
+  // captioning — that was the whole point of dropping the streaming path,
+  // since restart-on-silence dedup artifacts went with it.
+  //
+  // All diagnostic feedback uses SnackBar (not addMessage) because when
+  // an overlay is open the chat output is hidden — addMessage would
+  // silently log to invisible chat. SnackBars float above the overlay.
   Future<void> _handleTalkStart() async {
     final state = context.read<ChatState>();
     state.setTalkActive(true);
+    state.setListening(true);
+
     state.setCurrentInput('');
 
-    final ok = await _speech.initialize();
-    if (!ok) return;
-
-    _speechSub?.cancel();
-    _speechSub = _speech.listen().listen((transcript) {
+    bool ok;
+    try {
+      ok = await _recorder.start();
+    } catch (e) {
       if (!mounted) return;
-      context.read<ChatState>().setCurrentInput(transcript);
-    });
-
-    // NOTE: parallel MicLevelService.start() (getUserMedia + AnalyserNode)
-    // is intentionally NOT called here. On at least one tested browser,
-    // running a second audio capture alongside the recognizer starves it
-    // of audio — the bars animate but STT stops producing transcripts.
-    // The service is kept for a future fix (single-capture-with-two-
-    // consumers, if/when feasible). Until then, MicLevelBars uses its
-    // ripple fallback.
+      state.setListening(false);
+      state.setTalkActive(false);
+      _toast('mic start threw: $e');
+      return;
+    }
+    if (!ok && mounted) {
+      state.setListening(false);
+      state.setTalkActive(false);
+      _toast('mic blocked (permission denied or device unavailable)');
+    }
   }
 
   Future<void> _handleTalkEnd() async {
     final state = context.read<ChatState>();
+    final auth = context.read<AuthService>();
     if (!state.isTalkActive) return;
-
-    await _speech.stop();
-    await _speechSub?.cancel();
-    _speechSub = null;
-
-    final transcript = state.currentInput.trim();
     state.setTalkActive(false);
-    state.clearCurrentInput();
 
-    if (transcript.isNotEmpty) {
-      await _sendMessage(transcript);
+    // Single exit-cleanup: ALWAYS clear listening + drop primary focus
+    // when this handler returns, no matter which branch. The unfocus is
+    // defensive against the "PTT stole focus" symptom — if any TextField
+    // picked up focus during the hold (e.g. via controller-text write),
+    // releasing it here restores normal tap routing across the UI.
+    void finish() {
+      if (!mounted) return;
+      state.setListening(false);
+      FocusManager.instance.primaryFocus?.unfocus();
     }
+
+    Uint8List? bytes;
+    try {
+      bytes = await _recorder.stop();
+    } catch (e) {
+      _toast('mic stop threw: $e');
+      finish();
+      return;
+    }
+
+    if (bytes == null || bytes.isEmpty) {
+      state.clearCurrentInput();
+      _toast('recorder produced 0 bytes (likely web pcm16 unsupported '
+          'or zero-length press)');
+      finish();
+      return;
+    }
+
+    final jwt = await auth.getAccessToken();
+    if (jwt == null) {
+      _toast('stt: not authenticated');
+      finish();
+      return;
+    }
+
+    TranscribeResult result;
+    try {
+      result = await _stt.transcribe(
+        audio: bytes,
+        format: _recorder.format,
+        jwt: jwt,
+      );
+    } on SpeechError catch (e) {
+      state.clearCurrentInput();
+      _toast(e.httpStatus == 422
+          ? "didn't catch that — try again"
+          : 'stt ${e.code}: ${e.detail}');
+      finish();
+      return;
+    } catch (e) {
+      state.clearCurrentInput();
+      _toast('stt threw: $e');
+      finish();
+      return;
+    }
+
+    if (!mounted) return;
+    final text = result.transcript.trim();
+    if (text.isEmpty) {
+      state.clearCurrentInput();
+      _toast('stt returned empty transcript (${result.durationSeconds}s audio)');
+      finish();
+      return;
+    }
+
+    // Transcripts always flow into the chat pipeline now — pushed
+    // screens (Journal, Settings) own their own mic and never route
+    // through this handler.
+    state.clearCurrentInput();
+    await _sendMessage(text);
+    finish();
+  }
+
+  // Floats a short debug/feedback message above whatever is on screen —
+  // safe to call while an overlay is hiding chat-output. Floating
+  // SnackBar so it sits above the chat-input row.
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 4),
+      ),
+    );
   }
 
   // Mute button is dual-purpose: it flips the ttsEnabled flag AND abends
@@ -683,7 +853,11 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<ChatState>();
+    // PTT is shown only when the user explicitly chose Voice in the
+    // mode slider. Pushed screens (Journal, Settings) own their own
+    // mic affordances now; they no longer register a global sink.
     final showPtt = state.mode == InputMode.voice;
+    final isToggleMode = state.pttMode == PttMode.tapToggle;
     final screenSize = MediaQuery.of(context).size;
     final pttPos = _clampPttPosition(
       _pttPosition ?? _defaultPttPosition(screenSize),
@@ -692,17 +866,97 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Scaffold(
       backgroundColor: const Color(0xFF1B1B1B),
+      drawer: Drawer(
+        backgroundColor: const Color(0xFF252525),
+        child: SafeArea(
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              const DrawerHeader(
+                decoration: BoxDecoration(color: Color(0xFF1B1B1B)),
+                child: Align(
+                  alignment: Alignment.bottomLeft,
+                  child: Text(
+                    'RegiMenu',
+                    style: TextStyle(color: Colors.white, fontSize: 20),
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.add, color: Colors.white),
+                title: const Text(
+                  'Add Food',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  // TODO: push AddFoodScreen onto the root navigator
+                  // — same dispatch as Enter Journal below — once
+                  // that screen exists.
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.book, color: Colors.white),
+                title: const Text(
+                  'Enter Journal',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const JournalScreen(),
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                title: const Text(
+                  'Food UPC scan',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const FoodUpcScanScreen(),
+                    ),
+                  );
+                },
+              ),
+              ListTile(
+                leading:
+                    const Icon(Icons.photo_camera, color: Colors.white),
+                title: const Text(
+                  'Camera',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const CameraScreen(),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1B1B1B),
         foregroundColor: Colors.white,
+        // Title shrinks to the overlay's name while an overlay is open —
+        // Mic-status (amber mic + level bars) sits next to the brand
+        // so the "is it listening" cue is always visible. The route's
+        // own AppBar supplies overlay-specific titling when an overlay
+        // is pushed onto the inner Navigator.
         title: Row(
           children: [
             const Text('RegiMenu'),
             const SizedBox(width: 12),
-            // Mic icon goes amber ONLY when the recognizer is actually
-            // listening (not just when the button was pressed). The
-            // ~100-200ms delay between press and amber is the user's cue
-            // that the recognizer is now ready and they can start talking.
             Icon(
               Icons.mic,
               size: 18,
@@ -723,16 +977,24 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: 'Settings',
-            onPressed: () =>
-                context.read<ChatState>().openBloom('UserSettings'),
-          ),
+          // Overlays carry their own close affordance (the back
+          // arrow in the overlay panel's header bar) — no outer
+          // AppBar × needed. Clear renders unconditionally; it acts
+          // on the chat conversation which is always mounted
+          // beneath whatever overlay is open.
           IconButton(
             icon: const Icon(Icons.clear_all),
             tooltip: 'Clear',
             onPressed: _handleNewChat,
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'App Settings',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => const SettingsScreen(),
+              ),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.logout),
@@ -745,11 +1007,13 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Column(
             children: [
+              // Journal and Settings are pushed routes on the root
+              // Navigator now (see drawer / AppBar handlers above);
+              // they cover the whole app, not just this Expanded.
+              // Chat is just the chat, all the time.
               const Expanded(child: ChatOutput()),
               ChatInput(
                 onSend: _sendMessage,
-                onTalkStart: _handleTalkStart,
-                onTalkEnd: _handleTalkEnd,
                 onTtsToggle: _handleTtsToggle,
               ),
             ],
@@ -780,7 +1044,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             : Center(
                                 child: Text(
                                   'BLOOM: ${state.activeBloom}',
-                                  style: const TextStyle(color: Colors.white),
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                  ),
                                 ),
                               ),
                       ),
@@ -835,6 +1101,8 @@ class _ChatScreenState extends State<ChatScreen> {
               top: pttPos.dy,
               child: PttButton(
                 dragMode: _pttDragMode,
+                toggleMode: isToggleMode,
+                toggleActive: isToggleMode && state.isTalkActive,
                 onPressStart: _handleTalkStart,
                 onPressEnd: _handleTalkEnd,
                 onEnterDragMode: _handlePttEnterDragMode,
@@ -847,3 +1115,4 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 }
+

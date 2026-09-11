@@ -5,11 +5,15 @@ import 'package:http/http.dart' as http;
 
 import '../config.dart';
 
-/// Wraps `POST {API_BASE_URL}/tts` on the regi-api backend.
+/// Wraps `POST {API_BASE_URL}/speech/tts` on the regi-api backend.
 ///
 /// Server contract (matches schemas/tts.schema.json in regi-api):
-///   Request:  { text, voice?, languageCode?, speakingRate?, useSSML? }
+///   Request:  { text, voice?, languageCode?, useSSML? }
 ///   Response: { audioBase64, mimeType, sizeBytes, voiceUsed, latencyMs? }
+///
+/// The server's SynthesizeRequest still accepts speakingRate — the
+/// client-side plumbing for it was ripped in v1.0 (no UI surface), so
+/// we never send it. Re-add when a playback-speed control returns.
 ///
 /// JWT is passed per-call (same pattern as ChatService.streamChat) — caller
 /// fetches a fresh token from AuthService before each synthesis.
@@ -30,7 +34,6 @@ class TtsService {
     required String jwt,
     String? voice,
     String? languageCode,
-    double? speakingRate,
     bool? useSSML,
   }) async {
     if (text.trim().isEmpty) return;
@@ -41,13 +44,12 @@ class TtsService {
     final body = <String, dynamic>{'text': text};
     if (voice != null) body['voice'] = voice;
     if (languageCode != null) body['languageCode'] = languageCode;
-    if (speakingRate != null) body['speakingRate'] = speakingRate;
     if (useSSML != null) body['useSSML'] = useSSML;
 
     http.Response res;
     try {
       res = await http.post(
-        Uri.parse('$_baseUrl/tts'),
+        Uri.parse('$_baseUrl/speech/tts'),
         headers: {
           'Content-Type': 'application/json',
           'Authorization': 'Bearer $jwt',

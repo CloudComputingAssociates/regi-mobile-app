@@ -5,21 +5,16 @@ import '../models/input_mode.dart';
 import '../state/chat_state.dart';
 import 'mode_slider.dart';
 
-const _talkActiveColor = Color(0xFFF2B33D);
 const _barColor = Color(0xFF3A3A3A);
 
 class ChatInput extends StatefulWidget {
   const ChatInput({
     super.key,
     required this.onSend,
-    required this.onTalkStart,
-    required this.onTalkEnd,
     required this.onTtsToggle,
   });
 
   final void Function(String text) onSend;
-  final VoidCallback onTalkStart;
-  final VoidCallback onTalkEnd;
 
   /// Tapped on the mute button. Owner is expected to both flip the
   /// ttsEnabled flag AND abend any in-flight TTS playback so a user
@@ -92,14 +87,11 @@ class _ChatInputState extends State<ChatInput> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Row 1: TTS controls (left) + input mode + Talk (right)
+            // Row 1: TTS mute (left) + input mode (right). The big
+            // floating PttButton is the only mic affordance — no inline
+            // duplicate here.
             Row(
               children: [
-                _SpeedButton(
-                  rate: state.ttsRate,
-                  onChanged: state.setTtsRate,
-                ),
-                const SizedBox(width: 6),
                 _MuteButton(
                   enabled: state.ttsEnabled,
                   onTap: widget.onTtsToggle,
@@ -108,13 +100,6 @@ class _ChatInputState extends State<ChatInput> {
                 ModeSlider(
                   mode: state.mode,
                   onChanged: state.setMode,
-                ),
-                const SizedBox(width: 8),
-                _TalkButton(
-                  enabled: isVoice,
-                  active: state.isTalkActive,
-                  onPressStart: widget.onTalkStart,
-                  onPressEnd: widget.onTalkEnd,
                 ),
               ],
             ),
@@ -159,68 +144,6 @@ class _ChatInputState extends State<ChatInput> {
                   onTap: _handleSend,
                 ),
               ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _SpeedButton extends StatelessWidget {
-  const _SpeedButton({required this.rate, required this.onChanged});
-
-  final double rate;
-  final ValueChanged<double> onChanged;
-
-  static const _presets = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
-
-  @override
-  Widget build(BuildContext context) {
-    return PopupMenuButton<double>(
-      tooltip: 'Playback speed',
-      onSelected: onChanged,
-      color: const Color(0xFF252525),
-      itemBuilder: (_) => [
-        for (final p in _presets)
-          PopupMenuItem<double>(
-            value: p,
-            child: Row(
-              children: [
-                if ((p - rate).abs() < 0.001)
-                  const Icon(Icons.check,
-                      size: 14, color: Color(0xFFF2B33D))
-                else
-                  const SizedBox(width: 14),
-                const SizedBox(width: 6),
-                Text(
-                  '${p.toStringAsFixed(2)}×',
-                  style: const TextStyle(color: Colors.white, fontSize: 13),
-                ),
-              ],
-            ),
-          ),
-      ],
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: const Color(0xFF555555),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.center,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.speed, size: 14, color: Colors.white70),
-            const SizedBox(width: 4),
-            Text(
-              '${rate.toStringAsFixed(2)}×',
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 12,
-                fontFeatures: [FontFeature.tabularFigures()],
-              ),
             ),
           ],
         ),
@@ -297,46 +220,3 @@ class _SquareButton extends StatelessWidget {
   }
 }
 
-class _TalkButton extends StatelessWidget {
-  const _TalkButton({
-    required this.enabled,
-    required this.active,
-    required this.onPressStart,
-    required this.onPressEnd,
-  });
-
-  final bool enabled;
-  final bool active;
-  final VoidCallback onPressStart;
-  final VoidCallback onPressEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = !enabled
-        ? const Color(0xFF333333)
-        : active
-            ? _talkActiveColor
-            : const Color(0xFF2196F3);
-    return Listener(
-      behavior: HitTestBehavior.opaque,
-      onPointerDown: enabled ? (_) => onPressStart() : null,
-      onPointerUp: enabled ? (_) => onPressEnd() : null,
-      onPointerCancel: enabled ? (_) => onPressEnd() : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 100),
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-        ),
-        alignment: Alignment.center,
-        child: Icon(
-          Icons.mic,
-          color: enabled ? Colors.white : Colors.white24,
-          size: 20,
-        ),
-      ),
-    );
-  }
-}

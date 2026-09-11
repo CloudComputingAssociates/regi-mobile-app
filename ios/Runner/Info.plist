@@ -39,8 +39,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Take progress photos for your journal.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>RegiMenu uses the microphone for voice input to log meals and ask nutrition questions.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attach a photo to your journal entry.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>RegiMenu uses speech recognition to transcribe your voice input.</string>
 	<key>UIApplicationSceneManifest</key>

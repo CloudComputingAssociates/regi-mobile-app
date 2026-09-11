@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/input_mode.dart';
+import '../models/ptt_mode.dart';
 
 class ChatState extends ChangeNotifier {
   final List<ChatMessage> _messages = [];
@@ -12,8 +13,8 @@ class ChatState extends ChangeNotifier {
   String? _sessionId;
   String _currentInput = '';
   bool _ttsEnabled = true;
-  double _ttsRate = 1.25;
   String? _activeBloom;
+  PttMode _pttMode = PttMode.holdToTalk;
 
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   InputMode get mode => _mode;
@@ -23,8 +24,14 @@ class ChatState extends ChangeNotifier {
   String? get sessionId => _sessionId;
   String get currentInput => _currentInput;
   bool get ttsEnabled => _ttsEnabled;
-  double get ttsRate => _ttsRate;
   String? get activeBloom => _activeBloom;
+  PttMode get pttMode => _pttMode;
+
+  void setPttMode(PttMode mode) {
+    if (_pttMode == mode) return;
+    _pttMode = mode;
+    notifyListeners();
+  }
 
   void setMode(InputMode mode) {
     if (_mode == mode) return;
@@ -104,15 +111,6 @@ class ChatState extends ChangeNotifier {
 
   void toggleTts() {
     _ttsEnabled = !_ttsEnabled;
-    notifyListeners();
-  }
-
-  /// Clamps to GCP TTS's accepted range (0.25..4.0). Practical UI range
-  /// is narrower (e.g. 0.75..2.0) — clamping defends against bad input.
-  void setTtsRate(double rate) {
-    final clamped = rate.clamp(0.25, 4.0);
-    if ((clamped - _ttsRate).abs() < 0.001) return;
-    _ttsRate = clamped;
     notifyListeners();
   }
 
