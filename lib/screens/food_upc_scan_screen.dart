@@ -9,8 +9,8 @@ import '../services/auth_service.dart';
 import '../services/user_food_service.dart';
 import '../widgets/close_disk_button.dart';
 // Conditional: real BarcodeDetector-backed scanner on web, unsupported stub
-// elsewhere. See services/upc_scanner_web.dart for why mobile_scanner can't
-// read UPC codes on web.
+// elsewhere. See services/upc_scanner_web.dart for why we drive the detector
+// ourselves at 1080p rather than using mobile_scanner.
 import '../services/upc_scanner_stub.dart'
     if (dart.library.js_interop) '../services/upc_scanner_web.dart';
 
@@ -18,10 +18,11 @@ import '../services/upc_scanner_stub.dart'
 /// drawer. Owns its own camera ([UpcScannerController]) — no global state is
 /// touched, mirroring the Journal screen's self-contained-mic convention.
 ///
-/// PLATFORM: this app ships as a web PWA. Scanning uses the browser-native
-/// `BarcodeDetector` API, which exists in Chrome on Android but NOT in any
-/// iOS browser (all forced onto WebKit). Where it's absent we show a clear
-/// "not supported" panel instead of a dead camera.
+/// PLATFORM: this app ships as a web PWA. Scanning uses the `BarcodeDetector`
+/// API — native in Chrome on Android, and on iOS WebKit (Safari + all iOS
+/// browsers) supplied by the self-hosted ZXing-WASM polyfill loaded in
+/// index.html. Both feed the same hand-rolled 1080p detect loop. Only a
+/// browser missing both falls back to the "not available" panel.
 ///
 /// FLOW
 ///   • Camera auto-starts on open (scanning, Scan button disabled).
@@ -382,8 +383,9 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
     );
   }
 
-  /// Shown where `BarcodeDetector` is unavailable — notably any iOS browser
-  /// (Safari, and Chrome/Edge/Firefox on iOS, all WebKit).
+  /// Last-resort fallback for the rare browser with neither a native
+  /// `BarcodeDetector` nor the WASM polyfill available (the index.html polyfill
+  /// covers iOS WebKit, so this should now be almost unreachable in practice).
   Widget _unsupportedBox() {
     return AspectRatio(
       aspectRatio: 1,
@@ -400,14 +402,13 @@ class _FoodUpcScanScreenState extends State<FoodUpcScanScreen> {
             Icon(Icons.no_photography, color: _scanRed, size: 48),
             SizedBox(height: 14),
             Text(
-              'Barcode scanning isn’t supported in this browser yet.',
+              'Barcode scanning isn’t available in this browser.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.white, fontSize: 15),
             ),
             SizedBox(height: 8),
             Text(
-              'Use Chrome on Android. (iPhone browsers can’t scan yet — '
-              'support is coming.)',
+              'Try Chrome on Android or Safari on iOS.',
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.white54, fontSize: 12),
             ),

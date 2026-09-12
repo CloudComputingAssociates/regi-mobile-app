@@ -6,16 +6,18 @@ import 'dart:ui_web' as ui_web;
 import 'package:flutter/widgets.dart';
 import 'package:web/web.dart' as web;
 
-/// Web barcode scanner backed by the browser-native `BarcodeDetector` API
-/// (Chrome on Android). We open the camera ourselves with a HIGH-resolution
-/// constraint — the whole reason we don't use mobile_scanner on web, whose
-/// backend opens a low-res stream and decodes with ZXing-js, which can't
-/// read dense 1D UPC codes. `BarcodeDetector` + a sharp 1080p frame reads
-/// UPC/EAN reliably.
+/// Web barcode scanner backed by the `BarcodeDetector` API. We open the camera
+/// ourselves with a HIGH-resolution constraint — the whole reason we don't use
+/// mobile_scanner on web, whose backend opens a low-res stream that couldn't
+/// read dense 1D UPC codes. A sharp 1080p frame reads UPC/EAN reliably.
 ///
-/// `BarcodeDetector` does NOT exist in WebKit, so it is absent in Safari
-/// AND in Chrome/Edge/Firefox on iOS (all forced onto WebKit). Callers must
-/// gate on [isSupported] and show a fallback when false.
+/// `BarcodeDetector` is native in Chrome on Android. WebKit (iOS Safari and
+/// every iOS browser) has no native implementation, so index.html loads a
+/// self-hosted ZXing-C++ WASM polyfill that installs `window.BarcodeDetector`
+/// only when the native one is absent — Android keeps the native detector, iOS
+/// decodes the same 1080p frame in software. Either way [isSupported] is true
+/// and this code path is identical; [isSupported] only goes false on a browser
+/// with neither, where callers show a fallback.
 
 @JS('BarcodeDetector')
 extension type _BarcodeDetector._(JSObject _) implements JSObject {
@@ -67,7 +69,9 @@ class UpcScannerController {
   // change doesn't clobber the autofocus setting.
   bool _continuousFocus = false;
 
-  /// True only where the native BarcodeDetector API exists (Android Chrome).
+  /// True where a BarcodeDetector is present — native on Android Chrome, or the
+  /// index.html ZXing-WASM polyfill on iOS WebKit. False only on a browser with
+  /// neither (the rare fallback case).
   static bool get isSupported => web.window.has('BarcodeDetector');
 
   /// Whether the active camera exposes a usable zoom range (min < max).

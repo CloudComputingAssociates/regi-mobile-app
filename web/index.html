@@ -33,6 +33,37 @@
   <title>Mobile App</title>
   <link rel="manifest" href="manifest.json">
 
+  <!-- Barcode scanning polyfill for WebKit (iOS Safari + every iOS browser,
+       which have no native BarcodeDetector). Backed by ZXing-C++ WebAssembly.
+       SELF-HOSTED on purpose (no CDN): this is an installed PWA used at the
+       grocery shelf, so scanning must survive flaky store Wi-Fi / offline, and
+       we don't want a third-party runtime dependency. The polyfill installs
+       window.BarcodeDetector ONLY if one isn't already present, so Android
+       Chrome's native detector is left completely untouched.
+
+       Blocking classic script (same pattern as the Auth0 SDK below) so the
+       global exists before Flutter boots — no readiness race in Dart. The
+       .wasm is fetched lazily on first detect(), so the locateFile override
+       just below (pointing at the self-hosted copy, matching zxing-wasm@3.1.3)
+       is set well before any scan. -->
+  <script src="vendor/barcode-detector/polyfill.min.js"></script>
+  <script>
+    // Serve the ZXing reader .wasm from our own origin instead of jsDelivr.
+    // The module asks for "zxing_reader.wasm"; hand back the vendored path.
+    if (window.BarcodeDetectionAPI && window.BarcodeDetectionAPI.prepareZXingModule) {
+      window.BarcodeDetectionAPI.prepareZXingModule({
+        overrides: {
+          locateFile: function (path, prefix) {
+            if (path.endsWith('.wasm')) {
+              return 'vendor/barcode-detector/' + path;
+            }
+            return prefix + path;
+          },
+        },
+      });
+    }
+  </script>
+
   <!-- Required by auth0_flutter on web: loads the Auth0 SPA JS SDK that the
        Dart plugin delegates to. Without this, Auth0Client is undefined. -->
   <script src="https://cdn.auth0.com/js/auth0-spa-js/2.1/auth0-spa-js.production.js"></script>
